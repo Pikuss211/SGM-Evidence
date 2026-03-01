@@ -1,0 +1,6 @@
+cislo,vyrobce,typ,rok,spm,seriove,stav
+1,Demag,IntElect 100/520-410,1999,1212,33669,fault
+2,Demag,IntElect 150/520-610,1999,3322,123-123,fault
+3,Demag,IntElact 160-680,2020,558,6565-9,running
+4,Engel,elect,2022,332,9658-1,running
+5,Demag,Hydra,1999,999,789-1,running

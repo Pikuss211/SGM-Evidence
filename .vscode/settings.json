@@ -1,0 +1,17 @@
+{
+    "json.schemas": [
+        
+        {
+  "[python]": {
+    "editor.insertSpaces": true,
+    "editor.tabSize": 4,
+    "editor.detectIndentation": false,
+    "editor.autoIndent": "full",
+    "editor.formatOnPaste": true,
+    "editor.formatOnSave": true
+  },
+  "python.formatting.provider": "black"
+}
+
+    ]
+}
