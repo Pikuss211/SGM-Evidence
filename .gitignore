@@ -1,5 +1,25 @@
+# Python cache
 __pycache__/
 *.pyc
-.vscode/
-.env
+*.pyo
+*.pyd
+
+# Virtual environment
 venv/
+.env/
+.venv/
+
+# VS Code
+.vscode/
+
+# Build / packaging
+build/
+dist/
+*.spec
+
+# Logs
+*.log
+
+# OS files
+Thumbs.db
+.DS_Store
