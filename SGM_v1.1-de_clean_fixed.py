@@ -3063,6 +3063,14 @@ class StrojeGrid(StrojeGrid):  # rozšíření
         data_30 = [p for p in self.poruchy if in_30(p)]
         dataset = data_30 if data_30 else self.poruchy
 
+        period_dates = []
+        for p in dataset:
+            try:
+                period_dates.append(datetime.strptime(
+                    p.get("cas", ""), "%Y-%m-%d %H:%M"))
+            except Exception:
+                pass
+
         by_machine_cat = defaultdict(lambda: Counter())
         for p in dataset:
             by_machine_cat[str(p.get("cislo"))][normalize_kategorie(
@@ -3113,10 +3121,23 @@ class StrojeGrid(StrojeGrid):  # rozšíření
             ax.text(xi, y + max_tot * 0.03, str(y),
                     ha="center", va="bottom", fontsize=9)
 
+        if period_dates:
+            date_from = min(period_dates)
+            date_to = max(period_dates)
+            days_total = (date_to.date() - date_from.date()).days + 1
+            period_label = (
+                f"{date_from.strftime('%d.%m.%Y')} - "
+                f"{date_to.strftime('%d.%m.%Y')}, {days_total} "
+                f"{T('dní', 'Tage')}"
+            )
+        else:
+            period_label = T("bez data", "ohne Datum")
+
         ax.legend()
-        ax.set_title(T("TOP problémové stroje (za 30 dní)", "TOP Problem-Maschinen (in 30 Tagen)") if data_30
-                     else T("TOP problémové stroje (celkem)", "TOP Problem-Maschinen (gesamt)"),
-                     pad=15)
+        ax.set_title(
+            f"{T('TOP problémové stroje', 'TOP Problem-Maschinen')} ({period_label})",
+            pad=15
+        )
         ax.set_xlabel(T("Stroj", "Maschine"))
         ax.set_ylabel(T("Počet poruch", "Anzahl Störungen"))
         ax.set_xticks(x)
