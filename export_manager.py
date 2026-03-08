@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os
+import zipfile
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from data_manager import DATA_DIR, kat_ui, nacti_poruchy, slozka_stroje
+from data_manager import (
+    DATA_DIR,
+    SOUBOR_PORUCHY,
+    SOUBOR_SABLONY,
+    SOUBOR_STROJE,
+    kat_ui,
+    nacti_poruchy,
+    slozka_stroje,
+)
 
 
 LANG = os.environ.get("SGM_LANG", "de").strip().lower()
@@ -590,3 +599,41 @@ def export_poruchy_pdf(parent, cislo: str, stroje: dict):
         T(f"PDF bylo uloženo jako:\n{fname}", f"PDF wurde gespeichert als:\n{fname}"),
         parent=parent,
     )
+
+
+def backup_zip(parent=None):
+    ts = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
+    fname = filedialog.asksaveasfilename(
+        parent=parent,
+        defaultextension=".zip",
+        initialfile=f"sgm_backup_{ts}.zip",
+    )
+    if not fname:
+        return False
+    with zipfile.ZipFile(fname, "w") as z:
+        for p in [SOUBOR_STROJE, SOUBOR_PORUCHY, SOUBOR_SABLONY]:
+            if p.exists():
+                z.write(p, arcname=p.name)
+    messagebox.showinfo(
+        T("Záloha", "Sicherung"),
+        f"{T('Uloženo', 'Gespeichert')} {fname}",
+        parent=parent,
+    )
+    return True
+
+
+def restore_zip(parent=None):
+    fname = filedialog.askopenfilename(parent=parent, filetypes=[("ZIP", "*.zip")])
+    if not fname:
+        return False
+    with zipfile.ZipFile(fname) as z:
+        for name in ["stroje.csv", "poruchy.csv", "sablony_alarmu.csv"]:
+            if name in z.namelist():
+                with z.open(name) as src, open(DATA_DIR / name, "wb") as dst:
+                    dst.write(src.read())
+    messagebox.showinfo(
+        T("Obnova", "Wiederherstellung"),
+        T("Data obnovena.", "Daten wiederhergestellt."),
+        parent=parent,
+    )
+    return True
