@@ -53,3 +53,6 @@ A01235,2026-02-22 13:43,,33,51,elektricka,,haufiges Vorkommen Not-Aus,,otevrena,
 A55255,2026-02-22 13:59,,42,52,mechanicka,,WZ-Höhenverstellkettenspanner defekt,,otevrena,SX 18000-19000
 A06206,2026-02-25 18:42,,55,53,elektricka,,SC1 Antrieb 1 Fehler Umrichter Fehlernummer 36,,otevrena,IntElect 210/580-500
 A06206,2026-02-25 18:43,,55,54,elektricka,,Sc1 Antrieb 1 Fehler Umrichter Fehlernummer 8,,otevrena,IntElect 210/580-500
+A05458,2026-03-07 19:28,2026-03-07 19:31,51,55,mechanicka,Roman,Schließen Agregat Temperatur überschritten,Hauptkühlfilter verstopft – Filter reinigen,uzavrena,e-motion 940/220 T
+A668,2026-03-07 19:36,,65,56,elektricka,,"Tür, Sicherheitsprüfung fehlgeschlagen",,otevrena,Elexis
+A013,2026-03-08 10:29,2026-03-08 10:33,59,57,mechanicka,Roman,HY ventil Y136 undicht,"Hintere HY Block SCH.Einheit ,  ventil Y136 dichtung Dichtungsaustausch",uzavrena,C

@@ -49,3 +49,5 @@ cislo,vyrobce,typ,rok,spm,seriove,stav,wartung_last,wartung_interval
 53,Demag,EL-EXIS SP 250/630-920,2017,1104,8162-0155,bezi,,
 54,Demag,IntElect 160/520-680,2011,0656,7280-0128,bezi,,
 55,Demag,IntElect 210/580-500,2010,0613,7199-0042,porucha,,
+65,Demag,Elexis,2022,0225,323635,porucha,2026-03-07,180
+59,B,C,1990,8985,159357,bezi,,
