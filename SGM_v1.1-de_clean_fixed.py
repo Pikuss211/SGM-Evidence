@@ -7,7 +7,6 @@ import sys
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 import csv
-import zipfile
 import re
 from pathlib import Path
 from datetime import date, datetime, timedelta
