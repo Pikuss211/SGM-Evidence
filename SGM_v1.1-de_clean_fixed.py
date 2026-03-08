@@ -389,8 +389,6 @@ stav_ui = dm.stav_ui
 uloz_poruchy = dm.uloz_poruchy
 uloz_stroje = dm.uloz_stroje
 export_poruchy_pdf = em.export_poruchy_pdf
-backup_zip_export = em.backup_zip
-restore_zip_export = em.restore_zip
 vyber_fotky_dialog = em.vyber_fotky_dialog
 vyber_fotky_dialog_bez_miniatur = em.vyber_fotky_dialog_bez_miniatur
 
@@ -1749,106 +1747,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
         filtruj()  # první naplnění
 
     def export_wartung_csv(self):
-        """Exportuje seznam strojů s Wartung podle zvoleného režimu."""
-        from tkinter import filedialog
-
-        # jistota – načteme aktuální stroje z CSV
-        stroje = nacti_stroje()
-
-        # zvolený režim v roletce
-        mode = getattr(self, "wartung_mode", None)
-        mode = mode.get() if mode is not None else T("≤ 30 dní", "≤ 30 Tage")
-
-        rows = []
-        for cislo, s in stroje.items():
-            dny = days_to_next_wartung(s)
-            if dny is None:
-                # stroj bez Wartung – ignorujeme (nemá datum)
-                continue
-
-            # filtr podle režimu
-            if mode == T("prošlé", "überfällig"):
-                # jen ty, kde je Wartung prošlá (dny <= 0)
-                if dny > 0:
-                    continue
-            elif mode == T("≤ 30 dní", "≤ 30 Tage"):
-                # jen ty, kde je Wartung prošlá NEBO do 30 dní
-                if dny > 30:
-                    continue
-            elif mode == T("vše s Wartung", "Alle mit Wartung"):
-                # nefiltrujeme podle dnů – všechny se zadaným datumem
-                pass
-            else:
-                # fallback – chovej se jako „≤ 30 dní“
-                if dny > 30:
-                    continue
-
-            # textový popis stavu
-            if dny <= 0:
-                stav = T("prošlá", "überfällig")
-            elif dny == 1:
-                stav = T("za 1 den", "in 1 Tag")
-            else:
-                stav = f"{T('za', 'in')} {dny} {T('dní', 'Tagen')}"
-
-            # emoji status pro Excel / přehled
-            if dny <= 0:
-                status_ikona = "🔴 PROŠLÉ"
-            elif dny <= 30:
-                status_ikona = "🟡 BRZY"
-            else:
-                status_ikona = "🟢 OK"
-
-            rows.append({
-                "cislo": cislo,
-                "vyrobce": s.get("vyrobce", ""),
-                "typ": s.get("typ", ""),
-                "rok": s.get("rok", ""),
-                "spm": s.get("spm", ""),
-                "seriove": s.get("seriove", ""),
-                "wartung_last": s.get("wartung_last", ""),
-                "dny_do_wartung": dny,
-                "wartung_stav": stav,
-                "status_ikona": status_ikona,
-            })
-
-        if not rows:
-            messagebox.showinfo(
-                T("Wartung", "Wartung"),
-                T("Není žádný stroj odpovídající zvolenému filtru.",
-                  "Keine Maschine entspricht dem gewählten Filter."),
-                parent=self,
-            )
-            return
-
-        # seřadíme podle nejbližší Wartung
-        rows.sort(key=lambda r: r["dny_do_wartung"])
-
-        fname = filedialog.asksaveasfilename(
-            parent=self,
-            defaultextension=".csv",
-            filetypes=[("CSV", "*.csv")],
-            initialfile="SGM_Wartung_seznam.csv",
-            title=T("Uložit seznam Wartung", "Wartungsliste speichern"),
-        )
-        if not fname:
-            return
-
-        fieldnames = [
-            "cislo", "vyrobce", "typ", "rok", "spm", "seriove",
-            "wartung_last", "dny_do_wartung", "wartung_stav", "status_ikona",
-        ]
-
-        with open(fname, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=fieldnames)
-            w.writeheader()
-            w.writerows(rows)
-
-        messagebox.showinfo(
-            T("Wartung", "Wartung"),
-            f"{T('Seznam strojů pro Wartung byl uložen do', 'Liste der Maschinen für Wartung gespeichert in')}:\n{fname}",
-            parent=self,
-        )
+        em.export_wartung_csv(self)
 
     def prepnout_stav_toolbar(self):
         """Tlačítko z horní lišty – přepnutí stavu stroje běží/porucha"""

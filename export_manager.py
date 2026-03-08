@@ -11,7 +11,9 @@ from data_manager import (
     SOUBOR_PORUCHY,
     SOUBOR_SABLONY,
     SOUBOR_STROJE,
+    days_to_next_wartung,
     kat_ui,
+    nacti_stroje,
     nacti_poruchy,
     slozka_stroje,
 )
@@ -634,6 +636,106 @@ def restore_zip(parent=None):
     messagebox.showinfo(
         T("Obnova", "Wiederherstellung"),
         T("Data obnovena.", "Daten wiederhergestellt."),
+        parent=parent,
+    )
+    return True
+
+
+def export_wartung_csv(parent):
+    stroje = nacti_stroje()
+
+    mode_var = getattr(parent, "wartung_mode", None)
+    mode = mode_var.get() if mode_var is not None else T("≤ 30 dní", "≤ 30 Tage")
+
+    rows = []
+    for cislo, s in stroje.items():
+        dny = days_to_next_wartung(s)
+        if dny is None:
+            continue
+
+        if mode == T("prošlé", "überfällig"):
+            if dny > 0:
+                continue
+        elif mode == T("≤ 30 dní", "≤ 30 Tage"):
+            if dny > 30:
+                continue
+        elif mode == T("vše s Wartung", "Alle mit Wartung"):
+            pass
+        else:
+            if dny > 30:
+                continue
+
+        if dny <= 0:
+            stav = T("prošlá", "überfällig")
+            status_ikona = "🔴 PROŠLÉ"
+        elif dny == 1:
+            stav = T("za 1 den", "in 1 Tag")
+            status_ikona = "🟡 BRZY"
+        else:
+            stav = f"{T('za', 'in')} {dny} {T('dní', 'Tagen')}"
+            status_ikona = "🟡 BRZY" if dny <= 30 else "🟢 OK"
+
+        rows.append(
+            {
+                "cislo": cislo,
+                "vyrobce": s.get("vyrobce", ""),
+                "typ": s.get("typ", ""),
+                "rok": s.get("rok", ""),
+                "spm": s.get("spm", ""),
+                "seriove": s.get("seriove", ""),
+                "wartung_last": s.get("wartung_last", ""),
+                "dny_do_wartung": dny,
+                "wartung_stav": stav,
+                "status_ikona": status_ikona,
+            }
+        )
+
+    if not rows:
+        messagebox.showinfo(
+            T("Wartung", "Wartung"),
+            T(
+                "Není žádný stroj odpovídající zvolenému filtru.",
+                "Keine Maschine entspricht dem gewählten Filter.",
+            ),
+            parent=parent,
+        )
+        return False
+
+    rows.sort(key=lambda r: r["dny_do_wartung"])
+
+    fname = filedialog.asksaveasfilename(
+        parent=parent,
+        defaultextension=".csv",
+        filetypes=[("CSV", "*.csv")],
+        initialfile="SGM_Wartung_seznam.csv",
+        title=T("Uložit seznam Wartung", "Wartungsliste speichern"),
+    )
+    if not fname:
+        return False
+
+    fieldnames = [
+        "cislo",
+        "vyrobce",
+        "typ",
+        "rok",
+        "spm",
+        "seriove",
+        "wartung_last",
+        "dny_do_wartung",
+        "wartung_stav",
+        "status_ikona",
+    ]
+
+    with open(fname, "w", newline="", encoding="utf-8") as f:
+        import csv
+
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+
+    messagebox.showinfo(
+        T("Wartung", "Wartung"),
+        f"{T('Seznam strojů pro Wartung byl uložen do', 'Liste der Maschinen für Wartung gespeichert in')}:\n{fname}",
         parent=parent,
     )
     return True
