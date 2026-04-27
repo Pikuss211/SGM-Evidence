@@ -2,7 +2,7 @@ alarm,cas,cas_uzavreni,cislo,id,kategorie,operator_uzavrel,popis,reseni,stav,typ
 A339,2026-02-13 14:02,2026-02-13 14:17,12,42,elektricka,,Hy ventil neposílá signál,,uzavrena,S 1500-425
 A100,2026-02-12 13:58,,60,41,jina,,uvolněné zábradlí - čidlo hlásí chybu,,otevrena,TEST
 A6636,2026-02-12 13:56,,62,40,mechanicka,,prasklá spojha hadice chlazení,,otevrena,Hyd
-A003,2026-02-09 13:22,,23,39,elektricka,,EE1 hlásí chybu - snímač CD 3,,otevrena,xf3i
+A003,2026-02-09 13:22,,23,39,elektricka,,EE1 meldet einen Fehler – CD-Sensor 3,,otevrena,xf3i
 A4499,2026-02-05 10:21,2026-02-13 14:06,12,38,elektricka,Lenovo,vyhazuje jistič tponí EE1,výměna topení 4 na EE1 ,uzavrena,S 1500-425
 A3101 ,2026-01-31 15:52,,60,37,elektricka,,nejde zápis programu,,otevrena,TEST
 A611,2026-01-17 15:45,2026-01-17 18:14,36,36,elektricka,Lenovo,SE Umrichter Fehler 94,"Umrichter se přehřál , pročíštění okruhu chlazení Umrichtru ",uzavrena,EL-EXIS SP multi 420/820-2500/200v
@@ -12,25 +12,25 @@ unik vody,2026-01-17 15:12,2026-01-17 15:15,36,33,jina,Roman,"SE-2 unik vody z c
 A05056,2026-01-14 19:10,2026-01-14 19:14,11,32,elektricka,Roman,špatný signál čidla vzduchového pístu postraních  jader pro Bígl,"kontrola čidel , byli OK, kontrola zásuvky čidel , byli OK, byl přerušený kabel RH čidla - výměna kabelu",uzavrena,IntElect 210-500
 A0001,2025-11-09 10:38,2026-02-15 14:32,3,31,jina,Roman,přidělat plošinu,plošina přidělaná,uzavrena,IntElect 160-680
 Gitter Robota,2025-10-31 12:29,,38,30,jina,,nabouraná klec- opravit,,otevrena,S+ 5500_5650R 65
-A369,2025-10-29 17:31,,3,29,mechanicka,,Umriter SE ucpaný,,otevrena,IntElect 160-680
-A7777,2025-10-27 18:54,,22,28,mechanicka,,WegMessSystem - skácou hodnoty,,otevrena,IntElect 350/760-1700
+A369,2025-10-29 17:31,,3,29,mechanicka,,Umriter SE: Kühllufteinlass verstopft,,otevrena,IntElect 160-680
+A7777,2025-10-27 18:54,,22,28,mechanicka,,WegMessSystem - Sprungwerte,,otevrena,IntElect 350/760-1700
 STO240,2025-10-27 18:45,2025-11-03 18:45,22,27,elektricka,,umrichter fehler,špatný Bezpečnostní kontak proti dveří,uzavrena,IntElect 350/760-1700
-HYDAK,2025-10-27 18:39,,4,26,mechanicka,,vyčistit chlazení - průtok,,otevrena,e-motion 1640/220 T
+HYDAK,2025-10-27 18:39,,4,26,mechanicka,,Hydak-Kühlsystem reinigen – Wasserdurchfluss,,otevrena,e-motion 1640/220 T
 Dorazy stroje,2025-10-27 18:02,,5,25,jina,,připevnit do podlahy dorazy pro stroj,,otevrena,e-motion 1640/220 T
 HYDAK,2025-10-27 17:50,,5,24,jina,,Hydak - připojit chlazení,,otevrena,e-motion 1640/220 T
-A0255,2025-09-17 17:13,,21,23,mechanicka,,přehřátí HY oleje,,otevrena,EL-EXIS S 350/810-2300
-A01415,2025-09-17 17:12,,21,22,elektricka,,umrichter fehler,,otevrena,EL-EXIS S 350/810-2300
+A0255,2025-09-17 17:13,,21,23,mechanicka,,HY-Ölüberhitzung,,otevrena,EL-EXIS S 350/810-2300
+A01415,2025-09-17 17:12,,21,22,elektricka,,umrichter fehler 8,,otevrena,EL-EXIS S 350/810-2300
 A4542,2025-09-11 16:55,2025-09-11 16:58,17,21,elektricka,,velká teplota motoru S1 na  EE1,vzadu na stroji - rozdělovač chlazení - vyčistit ventil V 1,uzavrena,e-motion 740/220 T
-A551,2025-09-11 16:54,,17,20,mechanicka,,špatný dotlak šneku,,otevrena,e-motion 740/220 T
+A551,2025-09-11 16:54,,17,20,mechanicka,,schlechter Schneckendruck,,otevrena,e-motion 740/220 T
 A663,2025-09-10 17:53,2025-09-10 17:57,14,19,elektricka,,cidlo teploty vody  - poskakuje,výměna čidla v zadu u rozvodu vody,uzavrena,e-motion 740/220 T
-A769,2025-09-10 17:52,,14,18,elektricka,,nejde Hydraulika II,,otevrena,e-motion 740/220 T
+A769,2025-09-10 17:52,,14,18,elektricka,,Die Hydraulik von EE2 hat einen Fehler.,,otevrena,e-motion 740/220 T
 A779,2025-09-10 17:51,2026-01-17 16:14,14,17,elektricka,Roman,není proud v zásuvce pro Robota,"kontrola zásuvky stroj-robot, spadlý jistič - nahození jističe - vše OK",uzavrena,e-motion 740/220 T
 A654,2025-09-09 20:07,2025-11-09 11:49,11,16,mechanicka,,"čidlo voda C-12 , není chlad. medium",vyčistit vodní filtr- žádný průtok chlad. media,uzavrena,IntElect 210-500
 A7414,2025-09-09 20:06,2026-02-15 11:13,11,15,mechanicka,Roman,špinavý filtr F-3,vyčištění filtru F-3,uzavrena,IntElect 210-500
-A5454,2025-09-09 20:04,,11,14,elektricka,,stykač ST-11 nespíná,,otevrena,IntElect 210-500
-A4477,2025-09-09 20:03,,11,13,elektricka,,chyba dráhy formy,,otevrena,IntElect 210-500
-A1144,2025-09-09 20:02,,11,12,mechanicka,,nejde hýbat s EE1,,otevrena,IntElect 210-500
-A1212,2025-09-08 18:06,,1,11,elektricka,,EE1 se špatně nahřívá,,otevrena,IntElect 100/520-410
+A5454,2025-09-09 20:04,,11,14,elektricka,,Schütz ST-11 schaltet nicht.,,otevrena,IntElect 210-500
+A4477,2025-09-09 20:03,,11,13,elektricka,,WZ-Pfadfehler – Position wird nicht gehalten,,otevrena,IntElect 210-500
+A1144,2025-09-09 20:02,,11,12,mechanicka,,keine Bewegung s EE1,,otevrena,IntElect 210-500
+A1212,2025-09-08 18:06,,1,11,elektricka,,EE1 heizt nicht richtig.,,otevrena,IntElect 100/520-410
 A111,2025-09-08 18:00,2025-11-03 18:40,7,10,mechanicka,,"netočí se šnek , ale motor jede",,uzavrena,e-motion440/220 T
 A456,2025-09-07 12:54,2025-09-07 12:55,6,9,elektricka,,bezpečnost B442,porucha Relé R-2,uzavrena,e-motion 440/220 T
 A654,2025-09-07 12:53,2025-09-07 12:55,6,8,elektricka,,nejde HY 5,porucha Relé R-4,uzavrena,e-motion 440/220 T
@@ -41,8 +41,8 @@ A2020,2025-09-07 12:30,2025-09-07 12:47,5,4,elektricka,,dratbruch Heizkanal,A202
 A401,2025-09-07 11:52,2025-09-07 12:19,2,3,elektricka,,dveře hlásí poruchu koncáku K-3,výměna Koncáku dveří vlevo dole,uzavrena,IntElect  150/520-610
 A500,2025-09-07 11:50,2025-09-07 12:22,2,2,mechanicka,,šnek mimo zónu,porucha čidla na konci šneku - u Flanch zóiny,uzavrena,IntElect  150/520-610
 A400,2025-09-07 11:49,2025-09-07 11:54,2,1,elektricka,,Not-Aus ,"zkontrolovat Not-Aus tlačítka , jedno bylo poškozené",uzavrena,IntElect  150/520-610
-A339,2026-02-13 14:18,,12,43,elektricka,,Hydaulika signál o ventilu,,otevrena,S 1500-425
-A8587,2026-02-15 15:42,,21,44,jina,,Volná pístnice EE1,,otevrena,EL-EXIS S 350/810-2300
+A339,2026-02-13 14:18,,12,43,elektricka,,Das HY-Ventil Y-34 empfängt kein Signal.,,otevrena,S 1500-425
+A8587,2026-02-15 15:42,,21,44,mechanicka,,Freie Kolbenstange EE1,,otevrena,EL-EXIS S 350/810-2300
 A1158,2026-02-15 20:45,,24,45,mechanicka,,Massepolster - nestabilní,,otevrena,Elect 3
 A0025,2026-02-16 15:05,2026-02-16 15:07,18,46,elektricka,Robert,sicherumg EE1,sicherung getascht,uzavrena,e-motion 740/220 T
 A13,2026-02-16 17:00,,64,47,mechanicka,,Vacum - schwach,,otevrena,6 x JED
@@ -56,3 +56,8 @@ A06206,2026-02-25 18:43,,55,54,elektricka,,Sc1 Antrieb 1 Fehler Umrichter Fehler
 A05458,2026-03-07 19:28,2026-03-07 19:31,51,55,mechanicka,Roman,Schließen Agregat Temperatur überschritten,Hauptkühlfilter verstopft – Filter reinigen,uzavrena,e-motion 940/220 T
 A668,2026-03-07 19:36,,65,56,elektricka,,"Tür, Sicherheitsprüfung fehlgeschlagen",,otevrena,Elexis
 A013,2026-03-08 10:29,2026-03-08 10:33,59,57,mechanicka,Roman,HY ventil Y136 undicht,"Hintere HY Block SCH.Einheit ,  ventil Y136 dichtung Dichtungsaustausch",uzavrena,C
+A531,2026-04-20 19:48,,38,58,mechanicka,,Hydak - Wasserverlust,,otevrena,S+ 5500_5650R 65
+A5586,2026-04-26 18:56,,20,59,mechanicka,,"Luftleck am Ventil der Hauptzuleitung zur Maschine, Luftleck am Druckverstärker",,otevrena,e-motion2440H/170V/380 T combi
+A3336,2026-04-26 19:03,,20,60,elektricka,,Umrichterfehler 41 - Lüfterausfall - Lüfter müssen ausgetauscht werden.,,otevrena,e-motion2440H/170V/380 T combi
+A14,2026-04-26 21:47,,20,61,elektricka,,"NOT-AUS – die Tür ist geschlossen, meldet aber einen Fehler",,otevrena,e-motion2440H/170V/380 T combi
+HY Schlauch,2026-04-27 12:16,,34,62,mechanicka,,Tauschen Sie die HY-Schläuche im Bereich der HY-Pumpen aus – sie haben das Ende ihrer Lebensdauer erreicht!,,otevrena,Hydraulik

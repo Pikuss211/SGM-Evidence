@@ -396,7 +396,7 @@ def vyber_fotky_dialog_bez_miniatur(parent, image_paths: list):
     return result["paths"]
 
 
-def export_poruchy_pdf(parent, cislo: str, stroje: dict):
+def export_poruchy_pdf(parent, cislo: str, stroje: dict, alarm_filter: str | None = None, reseni_filter: str | None = None, selected_ids: list[str] | None = None):
     try:
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
@@ -435,8 +435,31 @@ def export_poruchy_pdf(parent, cislo: str, stroje: dict):
     cislo = str(cislo)
     vse = nacti_poruchy()
     poruchy = [p for p in vse if str(p.get("cislo")) == cislo]
+    if selected_ids is not None:
+        selected_set = {str(i) for i in selected_ids}
+        poruchy = [p for p in poruchy if str(p.get("id", "")) in selected_set]
+    if alarm_filter:
+        poruchy = [p for p in poruchy if (p.get("alarm") or "").strip() == alarm_filter]
+    if reseni_filter:
+        poruchy = [p for p in poruchy if (p.get("reseni") or "").strip() == reseni_filter]
 
     if not poruchy:
+        if alarm_filter or reseni_filter:
+            parts = []
+            if alarm_filter:
+                parts.append(f"{T('alarm', 'Alarm')}: {alarm_filter}")
+            if reseni_filter:
+                parts.append(f"{T('reseni', 'Lösung')}: {reseni_filter}")
+            filtr_txt = " | ".join(parts)
+            messagebox.showinfo(
+                T("Export PDF", "PDF-Export"),
+                T(
+                    f"Stroj {cislo} nema pro zvoleny filtr zadne poruchy k exportu.\nFiltr: {filtr_txt}",
+                    f"Maschine {cislo} hat fur den gewahlten Filter keine Störungen zum Export.\nFilter: {filtr_txt}",
+                ),
+                parent=parent,
+            )
+            return
         messagebox.showinfo(
             T("Export PDF", "PDF-Export"),
             T(f"Stroj {cislo} nemá žádné poruchy k exportu.", f"Maschine {cislo} hat keine Störungen zum Export."),

@@ -3,6 +3,7 @@
 from datetime import datetime
 from tkinter import simpledialog
 import os
+import shutil
 import sys
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
@@ -174,6 +175,67 @@ def ask_kategorie_combobox(parent) -> str | None:
 
     parent.wait_window(win)
     return result["val"]
+
+
+def install_text_context_menu(root: tk.Misc):
+    """Globální kontextové menu pro Entry/ttk.Entry/Text."""
+    menu = tk.Menu(root, tearoff=False)
+
+    def _is_editable(widget) -> bool:
+        try:
+            state = str(widget.cget("state")).lower()
+        except Exception:
+            return True
+        return state not in ("disabled", "readonly")
+
+    def _show(event):
+        widget = event.widget
+        if not isinstance(widget, (tk.Entry, tk.Text, ttk.Entry)):
+            return
+
+        try:
+            widget.focus_force()
+        except Exception:
+            pass
+
+        editable = _is_editable(widget)
+        menu.delete(0, "end")
+        menu.add_command(
+            label="Ausschneiden",
+            command=lambda w=widget: w.event_generate("<<Cut>>"),
+            state=("normal" if editable else "disabled"),
+        )
+        menu.add_command(
+            label="Kopieren",
+            command=lambda w=widget: w.event_generate("<<Copy>>"),
+        )
+        menu.add_command(
+            label="Einfügen",
+            command=lambda w=widget: w.event_generate("<<Paste>>"),
+            state=("normal" if editable else "disabled"),
+        )
+        menu.add_separator()
+
+        def _select_all(w=widget):
+            if isinstance(w, tk.Text):
+                w.tag_add("sel", "1.0", "end-1c")
+                w.mark_set("insert", "1.0")
+                w.see("insert")
+            else:
+                w.selection_range(0, "end")
+                w.icursor("end")
+
+        menu.add_command(label="Alles markieren", command=_select_all)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    for seq in ("<Button-3>", "<Button-2>", "<Control-Button-1>"):
+        root.bind_class("Entry", seq, _show, add="+")
+        root.bind_class("TEntry", seq, _show, add="+")
+        root.bind_class("Text", seq, _show, add="+")
 
 
 def bulk_uzavrit_dialog(parent, poruchy: list) -> list[str] | None:
@@ -394,6 +456,7 @@ vyber_fotky_dialog_bez_miniatur = em.vyber_fotky_dialog_bez_miniatur
 class StrojeGrid(tk.Tk):
     def __init__(self):
         super().__init__()
+        install_text_context_menu(self)
         self.title(T("SGM – přehled strojů", "SGM – Maschinenübersicht"))
         self.geometry("1200x740")
         self.configure(bg="#e9f2f7")
@@ -594,6 +657,57 @@ class StrojeGrid(tk.Tk):
                   command=lambda: _set_f("jina")).pack(side="left", padx=4)
 
         # skrolovatelná mřížka dlaždic
+        legend.pack_forget()
+        for child in filtr.winfo_children():
+            child.destroy()
+
+        self._filter_buttons = {}
+        filter_defs = [
+            ("vse", "Alle", "#d9dde3", "#c7ccd3"),
+            ("elektricka", "Elektrisch", "#f8c2c2", "#efaaaa"),
+            ("mechanicka", "Mechanisch", "#c2d4f8", "#a9c2f2"),
+            ("jina", "Sonstige", "#f8f4c2", "#efe99b"),
+            ("ok", "OK", "#c7f1d0", "#aee6bb"),
+        ]
+
+        def _refresh_filter_buttons():
+            active = self.filtr_kat.get()
+            for key, btn in self._filter_buttons.items():
+                is_active = key == active
+                btn.configure(
+                    relief=("sunken" if is_active else "raised"),
+                    bd=(3 if is_active else 1),
+                    font=("Segoe UI", 9, "bold" if is_active else "normal"),
+                    highlightthickness=(1 if is_active else 0),
+                )
+
+        def _set_f(cat):
+            self.filtr_kat.set(cat)
+            _refresh_filter_buttons()
+            self.nakresli_mrizku()
+
+        for key, de_label, bg, active_bg in filter_defs:
+            cz_label = (
+                "Alle" if key == "vse" else
+                "Elektrisch" if key == "elektricka" else
+                "Mechanisch" if key == "mechanicka" else
+                "Sonstige" if key == "jina" else
+                "OK"
+            )
+            btn = tk.Button(
+                filtr,
+                text=T(cz_label, de_label),
+                bg=bg,
+                activebackground=active_bg,
+                padx=10,
+                pady=2,
+                command=lambda c=key: _set_f(c),
+            )
+            btn.pack(side="left", padx=(0, 6))
+            self._filter_buttons[key] = btn
+
+        _refresh_filter_buttons()
+
         wrap = tk.Frame(self, bg="#e9f2f7")
         wrap.pack(fill="both", expand=True, padx=10, pady=10)
         self.canvas = tk.Canvas(wrap, bg="#e9f2f7", highlightthickness=0)
@@ -791,6 +905,292 @@ class StrojeGrid(tk.Tk):
         tk.Button(win, text=T("Export CSV", "CSV export"),
                   command=export_csv).pack(pady=(0, 10))
 
+    def statistiky_gui(self):
+        # přepočítat z čerstvých dat
+        self.poruchy = nacti_poruchy()
+        open_counts = self.spocti_otevrene()
+        cnt_30 = self.spocti_poruchy(days=30)
+        cnt_all = self.spocti_poruchy(days=None)
+
+        win = tk.Toplevel(self)
+        win.title(T("Statistiky – TOP stroje", "Statistik – TOP Maschinen"))
+        win.geometry("900x560")
+
+        cols = ("cislo", "vyrobce", "typ", "otevrene", "za_30d", "celkem")
+
+        HEAD = {
+            "cislo":    T("Číslo", "Nr."),
+            "vyrobce":  T("Výrobce", "Hersteller"),
+            "typ":      T("Typ", "Typ"),
+            "otevrene": T("Otevřené", "Offen"),
+            "za_30d":   T("Za_30d", "30T"),
+            "celkem":   T("Celkem", "Gesamt"),
+        }
+
+        style_name = "TopMachines.Treeview"
+        style = ttk.Style(win)
+        style.configure(
+            style_name,
+            rowheight=24,
+            font=("Segoe UI", 10),
+            background="#ffffff",
+            fieldbackground="#ffffff",
+        )
+        style.configure(
+            f"{style_name}.Heading",
+            font=("Segoe UI", 10, "bold"),
+            background="#efefef",
+            relief="flat",
+        )
+
+        outer = tk.Frame(win, padx=12, pady=12)
+        outer.pack(fill="both", expand=True)
+
+        tk.Label(
+            outer,
+            text="Top Maschinen nach Anzahl der Störungen.",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w", pady=(0, 10))
+
+        table_frame = tk.Frame(outer)
+        table_frame.pack(fill="both", expand=True)
+
+        tree = ttk.Treeview(table_frame, columns=cols, show="headings", style=style_name)
+        col_cfg = {
+            "cislo": (60, "center", False),
+            "vyrobce": (150, "w", False),
+            "typ": (320, "w", True),
+            "otevrene": (80, "center", False),
+            "za_30d": (80, "center", False),
+            "celkem": (90, "center", False),
+        }
+        for c in cols:
+            width, anchor, stretch = col_cfg[c]
+            tree.heading(c, text=HEAD.get(c, c), anchor="center" if c != "typ" else "w")
+            tree.column(c, width=width, minwidth=width, anchor=anchor, stretch=stretch)
+
+        yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=yscroll.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+
+        tree.tag_configure("odd", background="#ffffff")
+        tree.tag_configure("even", background="#f6f6f6")
+        tree.tag_configure("open_alert", foreground="#b00020")
+        tree.tag_configure("top1", foreground="#0f5c2e", font=("Segoe UI", 10, "bold"))
+        tree.tag_configure("top2", foreground="#2f6b3d")
+        tree.tag_configure("top3", foreground="#4c7b56")
+
+        rows = []
+        for c_str, stroj in self.stroje.items():
+            rows.append((
+                int(c_str),
+                stroj.get("vyrobce", ""),
+                stroj.get("typ", ""),
+                open_counts.get(c_str, 0),
+                cnt_30.get(c_str, 0),
+                cnt_all.get(c_str, 0),
+            ))
+        rows.sort(key=lambda r: (-r[3], -r[4], -r[5], r[0]))
+
+        top_values = sorted({r[5] for r in rows}, reverse=True)[:3]
+        top_rank = {val: idx + 1 for idx, val in enumerate(top_values)}
+
+        for idx, r in enumerate(rows):
+            tags = ["even" if idx % 2 else "odd"]
+            if r[3] > 0:
+                tags.append("open_alert")
+            rank = top_rank.get(r[5])
+            if rank == 1:
+                tags.append("top1")
+            elif rank == 2:
+                tags.append("top2")
+            elif rank == 3:
+                tags.append("top3")
+            tree.insert("", "end", values=r, tags=tuple(tags))
+
+        def export_csv():
+            fname = filedialog.asksaveasfilename(parent=win, defaultextension=".csv",
+                                                 initialfile="statistiky_stroje.csv",
+                                                 filetypes=[("CSV", "*.csv")])
+            if not fname:
+                return
+            with open(fname, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(cols)
+                for iid in tree.get_children():
+                    w.writerow(tree.item(iid)["values"])
+            messagebox.showinfo(T("Export", "Export"), T(
+                f"Uloženo: {fname}", f"Gespeichert: {fname}"), parent=win)
+
+        btns = tk.Frame(outer)
+        btns.pack(fill="x", pady=(12, 0))
+        tk.Button(btns, text=T("Export CSV", "CSV exportieren"),
+                  command=export_csv).pack(side="right")
+
+    def statistiky_gui(self):
+        # přepočítat z čerstvých dat
+        self.poruchy = nacti_poruchy()
+        open_counts = self.spocti_otevrene()
+        cnt_30 = self.spocti_poruchy(days=30)
+        cnt_all = self.spocti_poruchy(days=None)
+
+        win = tk.Toplevel(self)
+        win.title(T("Statistiky strojů", "Maschinenstatistik"))
+        win.geometry("900x560")
+
+        cols = ("cislo", "vyrobce", "typ", "otevrene", "za_30d", "celkem")
+
+        HEAD = {
+            "cislo":    T("Číslo", "Nr."),
+            "vyrobce":  T("Výrobce", "Hersteller"),
+            "typ":      T("Typ", "Typ"),
+            "otevrene": T("Otevřené", "Offen"),
+            "za_30d":   T("Za_30d", "30T"),
+            "celkem":   T("Celkem", "Gesamt"),
+        }
+
+        style_name = "TopMachines.Treeview"
+        style = ttk.Style(win)
+        style.configure(
+            style_name,
+            rowheight=24,
+            font=("Segoe UI", 10),
+            background="#ffffff",
+            fieldbackground="#ffffff",
+        )
+        style.configure(
+            f"{style_name}.Heading",
+            font=("Segoe UI", 10, "bold"),
+            background="#efefef",
+            relief="flat",
+        )
+
+        outer = tk.Frame(win, padx=12, pady=12)
+        outer.pack(fill="both", expand=True)
+
+        tk.Label(
+            outer,
+            text="Top Maschinen nach Anzahl der Störungen.",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w", pady=(0, 10))
+
+        filter_row = tk.Frame(outer)
+        filter_row.pack(fill="x", pady=(0, 10))
+        tk.Label(filter_row, text=T("Zobrazení:", "Ansicht:")).pack(side="left")
+        view_options = [
+            T("Všechny stroje", "Alle Maschinen"),
+            T("Top 10 podle celkem", "Top 10 nach Gesamt"),
+            T("Top 10 podle otevřených", "Top 10 nach Offen"),
+            T("Top 10 za posledních 30 dní", "Top 10 letzte 30 Tage"),
+        ]
+        view_var = tk.StringVar(value=view_options[0])
+        view_combo = ttk.Combobox(
+            filter_row,
+            textvariable=view_var,
+            values=view_options,
+            state="readonly",
+            width=28,
+        )
+        view_combo.pack(side="left", padx=(8, 0))
+
+        table_frame = tk.Frame(outer)
+        table_frame.pack(fill="both", expand=True)
+
+        tree = ttk.Treeview(table_frame, columns=cols, show="headings", style=style_name)
+        col_cfg = {
+            "cislo": (60, "center", False),
+            "vyrobce": (150, "w", False),
+            "typ": (320, "w", True),
+            "otevrene": (80, "center", False),
+            "za_30d": (80, "center", False),
+            "celkem": (90, "center", False),
+        }
+        for c in cols:
+            width, anchor, stretch = col_cfg[c]
+            tree.heading(c, text=HEAD.get(c, c), anchor="center" if c != "typ" else "w")
+            tree.column(c, width=width, minwidth=width, anchor=anchor, stretch=stretch)
+
+        yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=yscroll.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+
+        tree.tag_configure("odd", background="#ffffff")
+        tree.tag_configure("even", background="#f6f6f6")
+        tree.tag_configure("open_alert", foreground="#b00020")
+        tree.tag_configure("top1", foreground="#0f5c2e", font=("Segoe UI", 10, "bold"))
+        tree.tag_configure("top2", foreground="#2f6b3d")
+        tree.tag_configure("top3", foreground="#4c7b56")
+
+        rows = []
+        for c_str, stroj in self.stroje.items():
+            rows.append((
+                int(c_str),
+                stroj.get("vyrobce", ""),
+                stroj.get("typ", ""),
+                open_counts.get(c_str, 0),
+                cnt_30.get(c_str, 0),
+                cnt_all.get(c_str, 0),
+            ))
+        rows.sort(key=lambda r: (-r[3], -r[4], -r[5], r[0]))
+
+        def render_rows():
+            selected_view = view_var.get()
+            if selected_view == view_options[1]:
+                visible_rows = sorted(rows, key=lambda r: (-r[5], -r[3], -r[4], r[0]))[:10]
+            elif selected_view == view_options[2]:
+                visible_rows = sorted(rows, key=lambda r: (-r[3], -r[5], -r[4], r[0]))[:10]
+            elif selected_view == view_options[3]:
+                visible_rows = sorted(rows, key=lambda r: (-r[4], -r[3], -r[5], r[0]))[:10]
+            else:
+                visible_rows = list(rows)
+
+            for iid in tree.get_children():
+                tree.delete(iid)
+
+            top_values = sorted({r[5] for r in visible_rows}, reverse=True)[:3]
+            top_rank = {val: idx + 1 for idx, val in enumerate(top_values)}
+
+            for idx, r in enumerate(visible_rows):
+                tags = ["even" if idx % 2 else "odd"]
+                if r[3] > 0:
+                    tags.append("open_alert")
+                rank = top_rank.get(r[5])
+                if rank == 1:
+                    tags.append("top1")
+                elif rank == 2:
+                    tags.append("top2")
+                elif rank == 3:
+                    tags.append("top3")
+                tree.insert("", "end", values=r, tags=tuple(tags))
+
+        view_combo.bind("<<ComboboxSelected>>", lambda e: render_rows())
+        render_rows()
+
+        def export_csv():
+            fname = filedialog.asksaveasfilename(parent=win, defaultextension=".csv",
+                                                 initialfile="statistiky_stroje.csv",
+                                                 filetypes=[("CSV", "*.csv")])
+            if not fname:
+                return
+            with open(fname, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(cols)
+                for iid in tree.get_children():
+                    w.writerow(tree.item(iid)["values"])
+            messagebox.showinfo(T("Export", "Export"), T(
+                f"Uloženo: {fname}", f"Gespeichert: {fname}"), parent=win)
+
+        btns = tk.Frame(outer)
+        btns.pack(fill="x", pady=(12, 0))
+        tk.Button(btns, text=T("Export CSV", "CSV exportieren"),
+                  command=export_csv).pack(side="right")
+
     def _get_columns(self, sloupcu):
         if sloupcu is not None:
             return sloupcu
@@ -821,6 +1221,8 @@ class StrojeGrid(tk.Tk):
                 key = str(c)
                 otevrene = [p for p in self.poruchy if p.get(
                     "cislo") == key and p.get("stav") == "otevrena"]
+                if wanted == "ok":
+                    return not otevrene
                 if not otevrene:
                     return False
 
@@ -1167,7 +1569,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
         tk.Button(
             actions,
             text=UIT("🧾", T("Export PDF", "PDF Export")),
-            command=lambda: export_poruchy_pdf(win, cislo, self.stroje),
+            command=lambda: self.export_poruchy_pdf_s_filtrem(win, cislo),
         ).pack(side="left", expand=True, fill="x", padx=6, pady=6)
 
         tk.Button(
@@ -1229,6 +1631,527 @@ class StrojeGrid(StrojeGrid):  # rozšíření
         messagebox.showinfo(T("Výsledky", "Ergebnisse"),
                             "\n".join(text), parent=parent)
 
+    def export_poruchy_pdf_s_filtrem(self, parent, cislo):
+        poruchy_stroje = [p for p in self.poruchy if str(p.get("cislo")) == str(cislo)]
+        if not poruchy_stroje:
+            messagebox.showinfo(
+                T("Export PDF", "PDF-Export"),
+                T(f"Stroj {cislo} nemá žádné poruchy k exportu.", f"Maschine {cislo} hat keine Störungen zum Export."),
+                parent=parent,
+            )
+            return
+
+        vse_label = T("Všechny", "Alle")
+        alarmy = sorted({(p.get("alarm") or "").strip() for p in poruchy_stroje if (p.get("alarm") or "").strip()})
+        reseni = sorted({(p.get("reseni") or "").strip() for p in poruchy_stroje if (p.get("reseni") or "").strip()})
+
+        dlg = tk.Toplevel(parent)
+        dlg.title(T("Filtr PDF exportu", "PDF-Export Filter"))
+        dlg.transient(parent)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        frm = tk.Frame(dlg, padx=12, pady=12)
+        frm.pack(fill="both", expand=True)
+
+        tk.Label(
+            frm,
+            text=T("Vyber filtr pro export PDF.", "Filter für den PDF-Export auswählen."),
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+        tk.Label(frm, text=T("Alarm:", "Alarm:")).grid(row=1, column=0, sticky="w", pady=4)
+        alarm_var = tk.StringVar(value=vse_label)
+        alarm_combo = ttk.Combobox(
+            frm,
+            textvariable=alarm_var,
+            values=[vse_label, *alarmy],
+            state="readonly",
+            width=40,
+        )
+        alarm_combo.grid(row=1, column=1, sticky="ew", pady=4)
+
+        tk.Label(frm, text=T("Řešení:", "Lösung:")).grid(row=2, column=0, sticky="w", pady=4)
+        reseni_var = tk.StringVar(value=vse_label)
+        reseni_combo = ttk.Combobox(
+            frm,
+            textvariable=reseni_var,
+            values=[vse_label, *reseni],
+            state="readonly",
+            width=40,
+        )
+        reseni_combo.grid(row=2, column=1, sticky="ew", pady=4)
+
+        frm.grid_columnconfigure(1, weight=1)
+
+        result = {"confirmed": False}
+
+        def potvrdit():
+            result["confirmed"] = True
+            dlg.destroy()
+
+        def zrusit():
+            dlg.destroy()
+
+        btns = tk.Frame(frm)
+        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        tk.Button(btns, text=T("Storno", "Abbrechen"), command=zrusit).pack(side="right", padx=(6, 0))
+        tk.Button(btns, text=T("Tisk PDF", "PDF exportieren"), command=potvrdit).pack(side="right")
+
+        dlg.bind("<Return>", lambda e: potvrdit())
+        dlg.bind("<Escape>", lambda e: zrusit())
+        dlg.protocol("WM_DELETE_WINDOW", zrusit)
+        dlg.after(0, alarm_combo.focus_set)
+        parent.wait_window(dlg)
+
+        if not result["confirmed"]:
+            return
+
+        alarm_filter = None if alarm_var.get() == vse_label else alarm_var.get().strip()
+        reseni_filter = None if reseni_var.get() == vse_label else reseni_var.get().strip()
+
+        export_poruchy_pdf(
+            parent,
+            cislo,
+            self.stroje,
+            alarm_filter=alarm_filter,
+            reseni_filter=reseni_filter,
+        )
+
+    def export_poruchy_pdf_s_filtrem(self, parent, cislo):
+        poruchy_stroje = [p for p in self.poruchy if str(p.get("cislo")) == str(cislo)]
+        if not poruchy_stroje:
+            messagebox.showinfo(
+                T("Export PDF", "PDF-Export"),
+                T(f"Stroj {cislo} nemá žádné poruchy k exportu.", f"Maschine {cislo} hat keine Störungen zum Export."),
+                parent=parent,
+            )
+            return
+
+        poruchy_stroje = sorted(
+            poruchy_stroje,
+            key=lambda p: (p.get("cas") or "", str(p.get("id") or "")),
+            reverse=True,
+        )
+
+        def _zkrat(text, max_len=45):
+            text = (text or "").strip()
+            if len(text) <= max_len:
+                return text or "-"
+            return text[: max_len - 3].rstrip() + "..."
+
+        dlg = tk.Toplevel(parent)
+        dlg.title(T("Výběr poruch pro PDF export", "Störungen für PDF-Export auswählen"))
+        dlg.transient(parent)
+        dlg.grab_set()
+        dlg.resizable(True, True)
+        dlg.geometry("980x420")
+
+        frm = tk.Frame(dlg, padx=12, pady=12)
+        frm.pack(fill="both", expand=True)
+
+        tk.Label(
+            frm,
+            text=T("Vyber jednu nebo více konkrétních poruch pro export PDF.", "Eine oder mehrere konkrete Störungen für den PDF-Export auswählen."),
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        tk.Label(
+            frm,
+            text=T(
+                "Řádky jsou seřazeny od nejnovějších. Označ celý záznam, ne jen alarm nebo řešení.",
+                "Zeilen sind absteigend sortiert. Immer den ganzen Eintrag wählen, nicht nur Alarm oder Lösung.",
+            ),
+        ).grid(row=1, column=0, sticky="w", pady=(0, 10))
+
+        cols = ("cas", "alarm", "stav", "reseni")
+        tree_frame = tk.Frame(frm)
+        tree_frame.grid(row=2, column=0, sticky="nsew")
+
+        tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="extended", height=12)
+        tree.heading("cas", text=T("Datum/čas", "Datum/Zeit"))
+        tree.heading("alarm", text=T("Alarm", "Alarm"))
+        tree.heading("stav", text=T("Stav", "Status"))
+        tree.heading("reseni", text=T("Řešení", "Lösung"))
+        tree.column("cas", width=160, anchor="w", stretch=False)
+        tree.column("alarm", width=130, anchor="w", stretch=False)
+        tree.column("stav", width=110, anchor="w", stretch=False)
+        tree.column("reseni", width=520, anchor="w", stretch=True)
+
+        yscroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        xscroll = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+
+        tree.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        frm.grid_rowconfigure(2, weight=1)
+        frm.grid_columnconfigure(0, weight=1)
+
+        for p in poruchy_stroje:
+            iid = str(p.get("id", "")).strip()
+            if not iid:
+                continue
+            tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    p.get("cas", "") or "",
+                    p.get("alarm", "") or "",
+                    porucha_stav_ui(p.get("stav", "")),
+                    _zkrat(p.get("reseni", "")),
+                ),
+            )
+
+        result = {"selected_ids": None}
+
+        def potvrdit():
+            selected = list(tree.selection())
+            if not selected:
+                messagebox.showwarning(
+                    T("Export PDF", "PDF-Export"),
+                    T("Nejdřív označ alespoň jeden záznam poruchy.", "Zuerst mindestens einen Störungseintrag auswählen."),
+                    parent=dlg,
+                )
+                return
+            result["selected_ids"] = selected
+            dlg.destroy()
+
+        def zrusit():
+            dlg.destroy()
+
+        btns = tk.Frame(frm)
+        btns.grid(row=3, column=0, sticky="e", pady=(12, 0))
+        tk.Button(btns, text=T("Storno", "Abbrechen"), command=zrusit).pack(side="right", padx=(6, 0))
+        tk.Button(btns, text=T("Tisk PDF", "PDF exportieren"), command=potvrdit).pack(side="right")
+
+        dlg.bind("<Return>", lambda e: potvrdit())
+        dlg.bind("<Escape>", lambda e: zrusit())
+        dlg.protocol("WM_DELETE_WINDOW", zrusit)
+        dlg.after(0, tree.focus_set)
+        parent.wait_window(dlg)
+
+        if not result["selected_ids"]:
+            return
+
+        export_poruchy_pdf(
+            parent,
+            cislo,
+            self.stroje,
+            selected_ids=result["selected_ids"],
+        )
+
+    def export_poruchy_pdf_s_filtrem(self, parent, cislo):
+        poruchy_stroje = [p for p in self.poruchy if str(p.get("cislo")) == str(cislo)]
+        if not poruchy_stroje:
+            messagebox.showinfo(
+                T("Export PDF", "PDF-Export"),
+                T(f"Stroj {cislo} nemá žádné poruchy k exportu.", f"Maschine {cislo} hat keine Störungen zum Export."),
+                parent=parent,
+            )
+            return
+
+        poruchy_stroje = sorted(
+            poruchy_stroje,
+            key=lambda p: (p.get("cas") or "", str(p.get("id") or "")),
+            reverse=True,
+        )
+
+        def _zkrat(text, max_len=45):
+            text = (text or "").strip()
+            if len(text) <= max_len:
+                return text or "-"
+            return text[: max_len - 3].rstrip() + "..."
+
+        def _text_do_sloupce(p):
+            stav = (p.get("stav") or "").strip().lower()
+            if stav == "otevrena":
+                return p.get("popis", "") or ""
+            return p.get("reseni", "") or ""
+
+        dlg = tk.Toplevel(parent)
+        dlg.title(T("Výběr poruch pro PDF export", "Störungen für den PDF-Export auswählen"))
+        dlg.transient(parent)
+        dlg.grab_set()
+        dlg.resizable(True, True)
+        dlg.geometry("980x420")
+
+        frm = tk.Frame(dlg, padx=12, pady=12)
+        frm.pack(fill="both", expand=True)
+
+        tk.Label(
+            frm,
+            text=T("Vyber jednu nebo více konkrétních poruch pro export PDF.", "Eine oder mehrere konkrete Störungen für den PDF-Export auswählen."),
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        tk.Label(
+            frm,
+            text=T(
+                "Řádky jsou seřazeny od nejnovějších. Označ celý záznam, ne jen alarm nebo řešení.",
+                "Einträge sind absteigend sortiert. Bitte immer den kompletten Eintrag auswählen.",
+            ),
+        ).grid(row=1, column=0, sticky="w", pady=(0, 10))
+
+        filter_row = tk.Frame(frm)
+        filter_row.grid(row=2, column=0, sticky="w", pady=(0, 8))
+        tk.Label(filter_row, text=T("Stav:", "Status:")).pack(side="left")
+
+        stav_options = [
+            (T("Všechny", "Alle"), None),
+            (T("Jen otevřené", "Nur offen"), "otevrena"),
+            (T("Jen uzavřené", "Nur geschlossen"), "uzavrena"),
+        ]
+        stav_map = {label: value for label, value in stav_options}
+        stav_var = tk.StringVar(value=stav_options[0][0])
+        stav_combo = ttk.Combobox(
+            filter_row,
+            textvariable=stav_var,
+            values=[label for label, _ in stav_options],
+            state="readonly",
+            width=18,
+        )
+        stav_combo.pack(side="left", padx=(6, 0))
+
+        cols = ("cas", "alarm", "stav", "text")
+        tree_frame = tk.Frame(frm)
+        tree_frame.grid(row=3, column=0, sticky="nsew")
+
+        tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="extended", height=12)
+        tree.heading("cas", text=T("Datum/čas", "Datum/Zeit"))
+        tree.heading("alarm", text=T("Alarm", "Alarm"))
+        tree.heading("stav", text=T("Stav", "Status"))
+        tree.heading("text", text=T("Text", "Text"))
+        tree.column("cas", width=160, anchor="w", stretch=False)
+        tree.column("alarm", width=130, anchor="w", stretch=False)
+        tree.column("stav", width=110, anchor="w", stretch=False)
+        tree.column("text", width=520, anchor="w", stretch=True)
+
+        yscroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        xscroll = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+
+        tree.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        frm.grid_rowconfigure(3, weight=1)
+        frm.grid_columnconfigure(0, weight=1)
+
+        result = {"selected_ids": None}
+        poruchy_by_id = {
+            str(p.get("id", "")).strip(): p
+            for p in poruchy_stroje
+            if str(p.get("id", "")).strip()
+        }
+
+        def zobraz_detail_poruchy(iid):
+            por = poruchy_by_id.get(str(iid).strip())
+            if not por:
+                return
+            self._show_porucha_detail_dialog(dlg, por)
+            return
+
+            detail = tk.Toplevel(dlg)
+            detail.title("Detail der Störung")
+            detail.transient(dlg)
+            detail.resizable(False, False)
+
+            wrap = 520
+            frm_detail = tk.Frame(detail, padx=12, pady=12)
+            frm_detail.pack(fill="both", expand=True)
+
+            radky = [
+                ("Datum/Zeit", por.get("cas", "") or "-"),
+                ("Alarm", por.get("alarm", "") or "-"),
+                ("Status", porucha_stav_ui(por.get("stav", "")) or "-"),
+                ("Beschreibung", por.get("popis", "") or "-"),
+                ("Lösung", por.get("reseni", "") or "-"),
+            ]
+
+            for idx, (label, value) in enumerate(radky):
+                tk.Label(frm_detail, text=f"{label}:", font=("Segoe UI", 9, "bold")).grid(
+                    row=idx, column=0, sticky="nw", padx=(0, 10), pady=4
+                )
+                tk.Label(frm_detail, text=value, justify="left", anchor="w", wraplength=wrap).grid(
+                    row=idx, column=1, sticky="w", pady=4
+                )
+
+            frm_detail.grid_columnconfigure(1, weight=1)
+
+            btn = tk.Button(frm_detail, text="Schließen", command=detail.destroy)
+            btn.grid(row=len(radky), column=0, columnspan=2, sticky="e", pady=(12, 0))
+
+            detail.bind("<Escape>", lambda e: detail.destroy())
+            detail.bind("<Return>", lambda e: detail.destroy())
+            detail.protocol("WM_DELETE_WINDOW", detail.destroy)
+            detail.after(0, btn.focus_set)
+
+        def zobraz_detail_poruchy(iid):
+            por = poruchy_by_id.get(str(iid).strip())
+            if not por:
+                return
+
+            detail = tk.Toplevel(dlg)
+            detail.title("Detail der Störung")
+            detail.transient(dlg)
+            detail.resizable(False, False)
+
+            win_w = 760
+            win_h = 440
+            detail.geometry(f"{win_w}x{win_h}")
+            detail.update_idletasks()
+            parent_x = dlg.winfo_rootx()
+            parent_y = dlg.winfo_rooty()
+            parent_w = dlg.winfo_width()
+            parent_h = dlg.winfo_height()
+            pos_x = parent_x + max((parent_w - win_w) // 2, 0)
+            pos_y = parent_y + max((parent_h - win_h) // 2, 0)
+            detail.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+
+            status_text = porucha_stav_ui(por.get("stav", "")) or "-"
+            status_key = (por.get("stav") or "").strip().lower()
+            status_color = "#b00020" if status_key == "otevrena" else "#1f7a1f" if status_key == "uzavrena" else "black"
+            wrap = 560
+
+            frm_detail = tk.Frame(detail, padx=14, pady=14)
+            frm_detail.pack(fill="both", expand=True)
+            frm_detail.grid_columnconfigure(1, weight=1)
+
+            radky = [
+                ("Datum/Zeit", por.get("cas", "") or "-", None),
+                ("Alarm", por.get("alarm", "") or "-", None),
+                ("Status", status_text, status_color),
+                ("Beschreibung", por.get("popis", "") or "-", None),
+                ("Lösung", por.get("reseni", "") or "-", None),
+            ]
+
+            for idx, (label, value, color) in enumerate(radky):
+                tk.Label(
+                    frm_detail,
+                    text=f"{label}:",
+                    font=("Segoe UI", 9, "bold"),
+                    anchor="nw",
+                ).grid(row=idx, column=0, sticky="nw", padx=(0, 12), pady=5)
+                tk.Label(
+                    frm_detail,
+                    text=value,
+                    justify="left",
+                    anchor="w",
+                    wraplength=wrap,
+                    fg=color or "black",
+                ).grid(row=idx, column=1, sticky="w", pady=5)
+
+            detail_text = "\n".join([
+                f"Datum/Zeit: {por.get('cas', '') or '-'}",
+                f"Alarm: {por.get('alarm', '') or '-'}",
+                f"Status: {status_text}",
+                f"Beschreibung: {por.get('popis', '') or '-'}",
+                f"Lösung: {por.get('reseni', '') or '-'}",
+            ])
+
+            def kopirovat():
+                detail.clipboard_clear()
+                detail.clipboard_append(detail_text)
+                detail.update()
+                messagebox.showinfo("Info", "In die Zwischenablage kopiert.", parent=detail)
+
+            btns = tk.Frame(frm_detail)
+            btns.grid(row=len(radky), column=0, columnspan=2, sticky="e", pady=(16, 0))
+            btn = tk.Button(btns, text="Schließen", command=detail.destroy)
+            btn.pack(side="right")
+            copy_btn = tk.Button(btns, text="In Zwischenablage kopieren", command=kopirovat)
+            copy_btn.pack(side="right", padx=(0, 8))
+
+            detail.bind("<Escape>", lambda e: detail.destroy())
+            detail.bind("<Return>", lambda e: detail.destroy())
+            detail.protocol("WM_DELETE_WINDOW", detail.destroy)
+            detail.after(0, btn.focus_set)
+
+        def naplnit_tree():
+            selected_now = set(tree.selection())
+            current_filter = stav_map.get(stav_var.get())
+            for item in tree.get_children():
+                tree.delete(item)
+
+            for p in poruchy_stroje:
+                iid = str(p.get("id", "")).strip()
+                if not iid:
+                    continue
+                stav_key = (p.get("stav") or "").strip().lower()
+                if current_filter and stav_key != current_filter:
+                    continue
+                tree.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=(
+                        p.get("cas", "") or "",
+                        p.get("alarm", "") or "",
+                        porucha_stav_ui(p.get("stav", "")),
+                        _zkrat(_text_do_sloupce(p)),
+                    ),
+                )
+                if iid in selected_now:
+                    tree.selection_add(iid)
+
+        def potvrdit():
+            selected = list(tree.selection())
+            if not selected:
+                messagebox.showwarning(
+                    T("Export PDF", "PDF-Export"),
+                    T("Nejdřív označ alespoň jeden záznam poruchy.", "Zuerst mindestens einen Störungseintrag auswählen."),
+                    parent=dlg,
+                )
+                return
+            result["selected_ids"] = selected
+            dlg.destroy()
+
+        def zrusit():
+            dlg.destroy()
+
+        def otevrit_detail_event(event):
+            iid = tree.identify_row(event.y)
+            if not iid:
+                selection = tree.selection()
+                iid = selection[0] if selection else ""
+            if not iid:
+                return
+            tree.selection_add(iid)
+            tree.focus(iid)
+            zobraz_detail_poruchy(iid)
+
+        stav_combo.bind("<<ComboboxSelected>>", lambda e: naplnit_tree())
+        tree.bind("<Double-1>", otevrit_detail_event)
+        naplnit_tree()
+
+        btns = tk.Frame(frm)
+        btns.grid(row=4, column=0, sticky="e", pady=(12, 0))
+        tk.Button(btns, text=T("Storno", "Abbrechen"), command=zrusit).pack(side="right", padx=(6, 0))
+        tk.Button(btns, text=T("Tisk PDF", "PDF exportieren"), command=potvrdit).pack(side="right")
+
+        dlg.bind("<Return>", lambda e: potvrdit())
+        dlg.bind("<Escape>", lambda e: zrusit())
+        dlg.protocol("WM_DELETE_WINDOW", zrusit)
+        dlg.after(0, tree.focus_set)
+        parent.wait_window(dlg)
+
+        if not result["selected_ids"]:
+            return
+
+        export_poruchy_pdf(
+            parent,
+            cislo,
+            self.stroje,
+            selected_ids=result["selected_ids"],
+        )
+
     def nova_porucha(self, parent, stroj):
         alarm = simpledialog.askstring(
             T("Nová porucha", "Neue Störung"), T("Alarm:", "Alarm:"), parent=parent)
@@ -1260,6 +2183,156 @@ class StrojeGrid(StrojeGrid):  # rozšíření
         self.poruchy = por
         messagebox.showinfo(
             "OK", T("Porucha přidána.", "Störung hinzugefügt."), parent=parent)
+
+    def nova_porucha(self, parent, stroj):
+        alarm = simpledialog.askstring(
+            T("Nová porucha", "Neue Störung"), T("Alarm:", "Alarm:"), parent=parent)
+        if not alarm:
+            return
+
+        kat = ask_kategorie_combobox(parent)
+        if kat is None:
+            return
+
+        def ask_beschreibung_dialog(parent_win):
+            dlg = tk.Toplevel(parent_win)
+            dlg.title("Neue Störung")
+            dlg.transient(parent_win)
+            dlg.grab_set()
+            dlg.resizable(True, True)
+
+            win_w = 580
+            win_h = 300
+            dlg.geometry(f"{win_w}x{win_h}")
+            dlg.update_idletasks()
+            parent_x = parent_win.winfo_rootx()
+            parent_y = parent_win.winfo_rooty()
+            parent_w = parent_win.winfo_width()
+            parent_h = parent_win.winfo_height()
+            pos_x = parent_x + max((parent_w - win_w) // 2, 0)
+            pos_y = parent_y + max((parent_h - win_h) // 2, 0)
+            dlg.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+
+            frm = tk.Frame(dlg, padx=12, pady=12)
+            frm.pack(fill="both", expand=True)
+            frm.grid_columnconfigure(0, weight=1)
+            frm.grid_rowconfigure(1, weight=1)
+
+            tk.Label(frm, text="Beschreibung:").grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+            text_frame = tk.Frame(frm)
+            text_frame.grid(row=1, column=0, sticky="nsew")
+            text_frame.grid_columnconfigure(0, weight=1)
+            text_frame.grid_rowconfigure(0, weight=1)
+
+            txt = tk.Text(text_frame, height=7, wrap="word")
+            scroll = ttk.Scrollbar(text_frame, orient="vertical", command=txt.yview)
+            txt.configure(yscrollcommand=scroll.set)
+            txt.grid(row=0, column=0, sticky="nsew")
+            scroll.grid(row=0, column=1, sticky="ns")
+
+            result = {"value": None}
+
+            def potvrdit():
+                result["value"] = txt.get("1.0", "end-1c").strip()
+                dlg.destroy()
+
+            def zrusit():
+                dlg.destroy()
+
+            btns = tk.Frame(frm)
+            btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
+            tk.Button(btns, text="Abbrechen", command=zrusit).pack(side="right")
+            tk.Button(btns, text="OK", command=potvrdit, width=10).pack(side="right", padx=(0, 8))
+
+            dlg.bind("<Escape>", lambda e: zrusit())
+            dlg.bind("<Control-Return>", lambda e: potvrdit())
+            dlg.protocol("WM_DELETE_WINDOW", zrusit)
+            dlg.after(0, txt.focus_set)
+            parent_win.wait_window(dlg)
+            return result["value"]
+
+        popis = ask_beschreibung_dialog(parent)
+        if popis is None:
+            return
+
+        por = nacti_poruchy()
+        pid = nove_id(por)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        por.append({
+            "id": pid,
+            "cas": now,
+            "cas_uzavreni": "",
+            "cislo": stroj["cislo"],
+            "typ": stroj.get("typ", ""),
+            "alarm": alarm,
+            "kategorie": kat,
+            "popis": popis,
+            "reseni": "",
+            "stav": "otevrena"
+        })
+        uloz_poruchy(por)
+        self.poruchy = por
+        messagebox.showinfo(
+            "OK", T("Porucha přidána.", "Störung hinzugefügt."), parent=parent)
+
+    def _ask_multiline_text_dialog(self, parent_win, title: str, label: str, initial_text: str = "", width: int = 580, height: int = 300):
+        dlg = tk.Toplevel(parent_win)
+        dlg.title(title)
+        dlg.transient(parent_win)
+        dlg.grab_set()
+        dlg.resizable(True, True)
+
+        dlg.geometry(f"{width}x{height}")
+        dlg.update_idletasks()
+        parent_x = parent_win.winfo_rootx()
+        parent_y = parent_win.winfo_rooty()
+        parent_w = parent_win.winfo_width()
+        parent_h = parent_win.winfo_height()
+        pos_x = parent_x + max((parent_w - width) // 2, 0)
+        pos_y = parent_y + max((parent_h - height) // 2, 0)
+        dlg.geometry(f"{width}x{height}+{pos_x}+{pos_y}")
+
+        frm = tk.Frame(dlg, padx=12, pady=12)
+        frm.pack(fill="both", expand=True)
+        frm.grid_columnconfigure(0, weight=1)
+        frm.grid_rowconfigure(1, weight=1)
+
+        tk.Label(frm, text=label).grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+        text_frame = tk.Frame(frm)
+        text_frame.grid(row=1, column=0, sticky="nsew")
+        text_frame.grid_columnconfigure(0, weight=1)
+        text_frame.grid_rowconfigure(0, weight=1)
+
+        txt = tk.Text(text_frame, height=7, wrap="word")
+        scroll = ttk.Scrollbar(text_frame, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=scroll.set)
+        txt.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        if initial_text:
+            txt.insert("1.0", initial_text)
+
+        result = {"value": None}
+
+        def potvrdit():
+            result["value"] = txt.get("1.0", "end-1c").strip()
+            dlg.destroy()
+
+        def zrusit():
+            dlg.destroy()
+
+        btns = tk.Frame(frm)
+        btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
+        tk.Button(btns, text="Abbrechen", command=zrusit).pack(side="right")
+        tk.Button(btns, text="OK", command=potvrdit, width=10).pack(side="right", padx=(0, 8))
+
+        dlg.bind("<Escape>", lambda e: zrusit())
+        dlg.bind("<Control-Return>", lambda e: potvrdit())
+        dlg.protocol("WM_DELETE_WINDOW", zrusit)
+        dlg.after(0, txt.focus_set)
+        parent_win.wait_window(dlg)
+        return result["value"]
 
     def uzavrit_otevrenou_poruchu(self, parent, cislo: str):
         por = nacti_poruchy()
@@ -1366,6 +2439,106 @@ class StrojeGrid(StrojeGrid):  # rozšíření
             uloz_stroje(self.stroje)
 
         # === Editovat stroj (všechny nové kolonky) ===
+
+    def uzavrit_otevrenou_poruchu(self, parent, cislo: str):
+        por = nacti_poruchy()
+        opened = [p for p in por if p.get("cislo") == str(cislo) and p.get("stav") == "otevrena"]
+
+        if not opened:
+            messagebox.showinfo(T("Uzavření", "Schließen"), T(
+                "Žádná otevřená porucha u tohoto stroje.", "Keine offene Störung an dieser Maschine."), parent=parent)
+            return
+
+        target = vyber_otevrenou_poruchu_combo(parent, opened)
+        if target is None:
+            return
+
+        reseni = self._ask_multiline_text_dialog(
+            parent,
+            T("Uzavřít", "Schließen"),
+            f"{T('Řešení poruchy', 'Lösung Störung')} ({target.get('alarm', '')}):",
+        )
+        if not reseni:
+            return
+
+        from datetime import datetime
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        for p in por:
+            if p.get("id") == target.get("id"):
+                p["reseni"] = reseni
+                p["stav"] = "uzavrena"
+                p["cas_uzavreni"] = now
+                break
+
+        uloz_poruchy(por)
+        self.poruchy = por
+        self.nakresli_mrizku()
+        messagebox.showinfo("OK", T("Porucha uzavřena.",
+                            "Störung geschlossen."), parent=parent)
+
+    def uzavrit_poruchu_podle_alarmu(self, parent, cislo: str):
+        """Uzavření vybrané otevřené poruchy daného stroje (výběr přes Combobox)."""
+        from datetime import datetime
+
+        cislo = str(cislo)
+        por = nacti_poruchy()
+
+        opened = [
+            p for p in por
+            if p.get("cislo") == cislo and p.get("stav") == "otevrena"
+        ]
+
+        if not opened:
+            messagebox.showinfo(
+                T("Uzavření", "Schließen"),
+                f"{T('Stroj', 'Maschine')} {cislo} {T('nemá žádné otevřené poruchy', 'hat keine offenen Störungen')}.",
+                parent=parent
+            )
+            return
+
+        target = vyber_otevrenou_poruchu_combo(parent, opened)
+        if target is None:
+            return
+
+        reseni = self._ask_multiline_text_dialog(
+            parent,
+            T("Uzavřít", "Schließen"),
+            f"{T('Řešení poruchy', 'Lösung Störung')} ({target.get('alarm', '')}):",
+        )
+        if reseni is None or not reseni.strip():
+            return
+
+        op = simpledialog.askstring(
+            T("Operátor", "Operator"),
+            T("Kdo poruchu uzavřel?", "Wer hat Störung geschlossen?"),
+            initialvalue=self.operator,
+            parent=parent,
+        )
+        if op is None or not op.strip():
+            return
+        self.operator = op.strip()
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        for p in por:
+            if p.get("id") == target.get("id"):
+                p["reseni"] = reseni
+                p["stav"] = "uzavrena"
+                p["cas_uzavreni"] = now
+                p["operator_uzavrel"] = self.operator
+                break
+
+        uloz_poruchy(por)
+        self.poruchy = por
+        self.nakresli_mrizku()
+        messagebox.showinfo("OK", T("Porucha uzavřena.",
+                            "Störung geschlossen."), parent=parent)
+
+        open_left = any(p.get("cislo") == cislo and p.get(
+            "stav") == "otevrena" for p in por)
+        if not open_left and self.stroje.get(cislo, {}).get("stav") != "bezi":
+            self.stroje[cislo]["stav"] = "bezi"
+            uloz_stroje(self.stroje)
 
     def editovat_stroj_gui(self, parent, cislo):
         stroj = self.stroje.get(cislo)
@@ -1521,6 +2694,183 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
         messagebox.showinfo(T("Historie", "Historie"),
                             "\n".join(lines), parent=parent)
+
+    def historie_alarmu_gui(self, parent, cislo):
+        por = [p for p in nacti_poruchy() if p["cislo"] == cislo]
+        if not por:
+            messagebox.showinfo(T("Historie", "Historie"), T(
+                "Žádné záznamy.", "Keine Einträge."), parent=parent)
+            return
+
+        por = sorted(
+            por,
+            key=lambda p: (p.get("cas") or "", str(p.get("id") or "")),
+            reverse=True,
+        )
+        poruchy_by_id = {
+            str(p.get("id", "")).strip(): p
+            for p in por
+            if str(p.get("id", "")).strip()
+        }
+
+        def _zkrat(text, max_len=60):
+            text = (text or "").strip()
+            if len(text) <= max_len:
+                return text or "-"
+            return text[: max_len - 3].rstrip() + "..."
+
+        def _text_do_sloupce(p):
+            stav = (p.get("stav") or "").strip().lower()
+            if stav == "otevrena":
+                return p.get("popis", "") or ""
+            return p.get("reseni", "") or ""
+
+        def zobraz_detail_poruchy(iid):
+            por_detail = poruchy_by_id.get(str(iid).strip())
+            if not por_detail:
+                return
+            self._show_porucha_detail_dialog(win, por_detail)
+            return
+
+            detail = tk.Toplevel(win)
+            detail.geometry("620x420")
+            detail.title("Detail der Störung")
+            detail.transient(win)
+            detail.resizable(False, False)
+
+            win_w = 760
+            win_h = 440
+            detail.geometry(f"{win_w}x{win_h}")
+            detail.update_idletasks()
+            parent_x = win.winfo_rootx()
+            parent_y = win.winfo_rooty()
+            parent_w = win.winfo_width()
+            parent_h = win.winfo_height()
+            pos_x = parent_x + max((parent_w - win_w) // 2, 0)
+            pos_y = parent_y + max((parent_h - win_h) // 2, 0)
+            detail.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+
+            status_text = porucha_stav_ui(por_detail.get("stav", "")) or "-"
+            status_key = (por_detail.get("stav") or "").strip().lower()
+            status_color = "#b00020" if status_key == "otevrena" else "#1f7a1f" if status_key == "uzavrena" else "black"
+            wrap = 560
+
+            frm_detail = tk.Frame(detail, padx=14, pady=14)
+            frm_detail.pack(fill="both", expand=True)
+            frm_detail.grid_columnconfigure(1, weight=1)
+
+            radky = [
+                ("Datum/Zeit", por_detail.get("cas", "") or "-", None),
+                ("Alarm", por_detail.get("alarm", "") or "-", None),
+                ("Status", status_text, status_color),
+                ("Beschreibung", por_detail.get("popis", "") or "-", None),
+                ("Lösung", por_detail.get("reseni", "") or "-", None),
+            ]
+
+            for idx, (label, value, color) in enumerate(radky):
+                tk.Label(
+                    frm_detail,
+                    text=f"{label}:",
+                    font=("Segoe UI", 9, "bold"),
+                    anchor="nw",
+                ).grid(row=idx, column=0, sticky="nw", padx=(0, 12), pady=5)
+                tk.Label(
+                    frm_detail,
+                    text=value,
+                    justify="left",
+                    anchor="w",
+                    wraplength=wrap,
+                    fg=color or "black",
+                ).grid(row=idx, column=1, sticky="w", pady=5)
+
+            btn = tk.Button(frm_detail, text="Schließen", command=detail.destroy)
+            btn.grid(row=len(radky), column=0, columnspan=2, sticky="e", pady=(16, 0))
+            detail.bind("<Escape>", lambda e: detail.destroy())
+            detail.bind("<Return>", lambda e: detail.destroy())
+            detail.protocol("WM_DELETE_WINDOW", detail.destroy)
+            detail.after(0, btn.focus_set)
+
+        win = tk.Toplevel(parent)
+        win.title("Störungshistorie")
+        win.transient(parent)
+        win.grab_set()
+        win.resizable(True, True)
+        win.geometry("980x420")
+
+        frm = tk.Frame(win, padx=12, pady=12)
+        frm.pack(fill="both", expand=True)
+
+        tk.Label(
+            frm,
+            text="Alle Einträge für diese Maschine. Neueste zuerst.",
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+
+        cols = ("cas", "alarm", "stav", "text")
+        tree_frame = tk.Frame(frm)
+        tree_frame.grid(row=1, column=0, sticky="nsew")
+
+        tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=14)
+        tree.heading("cas", text="Datum/Zeit")
+        tree.heading("alarm", text="Alarm")
+        tree.heading("stav", text="Status")
+        tree.heading("text", text="Text")
+        tree.column("cas", width=160, anchor="w", stretch=False)
+        tree.column("alarm", width=130, anchor="w", stretch=False)
+        tree.column("stav", width=110, anchor="w", stretch=False)
+        tree.column("text", width=520, anchor="w", stretch=True)
+
+        yscroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        xscroll = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+
+        tree.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        frm.grid_rowconfigure(1, weight=1)
+        frm.grid_columnconfigure(0, weight=1)
+
+        for p in por:
+            iid = str(p.get("id", "")).strip()
+            if not iid:
+                continue
+            tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    p.get("cas", "") or "",
+                    p.get("alarm", "") or "",
+                    porucha_stav_ui(p.get("stav", "")),
+                    _zkrat(_text_do_sloupce(p)),
+                ),
+            )
+
+        def otevrit_detail_event(event):
+            iid = tree.identify_row(event.y)
+            if not iid:
+                selection = tree.selection()
+                iid = selection[0] if selection else ""
+            if not iid:
+                return
+            tree.selection_set(iid)
+            tree.focus(iid)
+            zobraz_detail_poruchy(iid)
+
+        tree.bind("<Double-1>", otevrit_detail_event)
+
+        btns = tk.Frame(frm)
+        btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
+        btn = tk.Button(btns, text="Schließen", command=win.destroy)
+        btn.pack(side="right")
+
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.bind("<Return>", lambda e: win.destroy())
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+        win.after(0, tree.focus_set)
 
     def backup_zip(self):
         em.backup_zip(self)
@@ -1729,8 +3079,67 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
             detail = tk.Toplevel(win)
             detail.title(f"{T('Detail poruchy', 'Störungsdetail')} {pid}")
-            msg = tk.Message(detail, text="\n".join(txt), width=800)
-            msg.pack(padx=10, pady=10)
+            detail.geometry("620x420")
+
+            frm_detail = tk.Frame(detail, padx=12, pady=12)
+            frm_detail.pack(fill="both", expand=True)
+            frm_detail.grid_columnconfigure(0, weight=1)
+            frm_detail.grid_rowconfigure(0, weight=1)
+
+            detail_text = "\n".join(txt)
+
+            text_widget = tk.Text(frm_detail, wrap="word", height=16)
+            scroll = ttk.Scrollbar(frm_detail, orient="vertical", command=text_widget.yview)
+            text_widget.configure(yscrollcommand=scroll.set)
+            text_widget.grid(row=0, column=0, sticky="nsew")
+            scroll.grid(row=0, column=1, sticky="ns")
+            text_widget.insert("1.0", detail_text)
+            text_widget.configure(state="disabled")
+
+            def copy_all():
+                detail.clipboard_clear()
+                detail.clipboard_append(detail_text)
+                detail.update()
+                messagebox.showinfo("Info", "In die Zwischenablage kopiert.", parent=detail)
+
+            def copy_selection(event=None):
+                try:
+                    selected = text_widget.get("sel.first", "sel.last")
+                except tk.TclError:
+                    selected = detail_text
+                detail.clipboard_clear()
+                detail.clipboard_append(selected)
+                detail.update()
+                return "break"
+
+            def select_all(event=None):
+                text_widget.tag_add("sel", "1.0", "end-1c")
+                text_widget.mark_set("insert", "1.0")
+                text_widget.see("insert")
+                return "break"
+
+            ctx = tk.Menu(detail, tearoff=False)
+            ctx.add_command(label="Kopieren", command=copy_selection)
+            ctx.add_command(label="Alles markieren", command=select_all)
+
+            def show_context(event):
+                try:
+                    ctx.tk_popup(event.x_root, event.y_root)
+                finally:
+                    ctx.grab_release()
+                return "break"
+
+            for seq in ("<Button-3>", "<Button-2>", "<Control-Button-1>"):
+                text_widget.bind(seq, show_context)
+            text_widget.bind("<Control-c>", copy_selection)
+
+            btns = tk.Frame(frm_detail)
+            btns.grid(row=1, column=0, columnspan=2, sticky="e", pady=(12, 0))
+            tk.Button(btns, text="Schließen", command=detail.destroy).pack(side="right")
+            tk.Button(btns, text="In Zwischenablage kopieren", command=copy_all).pack(side="right", padx=(0, 8))
+
+            detail.bind("<Escape>", lambda e: detail.destroy())
+            detail.after(0, text_widget.focus_set)
 
         tree.bind("<Double-1>", ukaz_detail_poruchy)
 
@@ -1747,6 +3156,231 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
     def export_wartung_csv(self):
         em.export_wartung_csv(self)
+
+    def _porucha_foto_slozka(self, porucha: dict) -> Path:
+        cislo = str(porucha.get("cislo", "")).strip() or "0"
+        pid = str(porucha.get("id", "")).strip() or "0"
+        return DATA_DIR / "photos" / f"stroj_{cislo}" / f"porucha_{pid}"
+
+    def _porucha_foto_paths(self, porucha: dict) -> list[Path]:
+        base = self._porucha_foto_slozka(porucha)
+        if not base.is_dir():
+            return []
+        paths = []
+        for ext in ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp"):
+            paths.extend(base.glob(ext))
+            paths.extend(base.glob(ext.upper()))
+        return sorted(set(paths))
+
+    def _otevrit_cestu_v_systemu(self, cesta: Path):
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(cesta))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                os.system(f'open "{cesta}"')
+            else:
+                os.system(f'xdg-open "{cesta}"')
+        except Exception as e:
+            messagebox.showerror(
+                T("Chyba", "Fehler"),
+                f"{T('Nepodařilo se otevřít soubor', 'Datei konnte nicht geöffnet werden')}:\n{e}",
+            )
+
+    def _porucha_foto_hinzufuegen(self, parent, porucha: dict, on_change=None):
+        src = filedialog.askopenfilename(
+            parent=parent,
+            title="Foto hinzufügen",
+            filetypes=[("Bilder", "*.jpg *.jpeg *.png *.bmp *.webp")],
+        )
+        if not src:
+            return
+
+        src_path = Path(src)
+        suffix = src_path.suffix.lower()
+        if suffix not in (".jpg", ".jpeg", ".png", ".bmp", ".webp"):
+            suffix = ".jpg"
+
+        dest_dir = self._porucha_foto_slozka(porucha)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        idx = 1
+        while True:
+            dest_name = f"{stamp}_{idx:02d}{suffix}"
+            dest_path = dest_dir / dest_name
+            if not dest_path.exists():
+                break
+            idx += 1
+
+        try:
+            shutil.copy2(src_path, dest_path)
+        except Exception as e:
+            messagebox.showerror(T("Chyba", "Fehler"), f"{e}", parent=parent)
+            return
+
+        if on_change:
+            on_change()
+        messagebox.showinfo(T("Foto", "Foto"), "Foto gespeichert.", parent=parent)
+
+    def _porucha_fotos_oeffnen(self, parent, porucha: dict, on_change=None):
+        photos = self._porucha_foto_paths(porucha)
+        if not photos:
+            messagebox.showinfo(T("Foto", "Foto"), "Keine Fotos vorhanden.", parent=parent)
+            return
+
+        win = tk.Toplevel(parent)
+        win.title("Fotos öffnen")
+        win.transient(parent)
+        win.grab_set()
+        win.resizable(True, True)
+        win.geometry("520x320")
+
+        frm = tk.Frame(win, padx=12, pady=12)
+        frm.pack(fill="both", expand=True)
+        frm.grid_columnconfigure(0, weight=1)
+        frm.grid_rowconfigure(0, weight=1)
+
+        listbox = tk.Listbox(frm)
+        scroll = ttk.Scrollbar(frm, orient="vertical", command=listbox.yview)
+        listbox.configure(yscrollcommand=scroll.set)
+        listbox.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+
+        for p in photos:
+            listbox.insert("end", p.name)
+
+        if photos:
+            listbox.selection_set(0)
+
+        def otevrit():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            self._otevrit_cestu_v_systemu(photos[sel[0]])
+            if on_change:
+                on_change()
+
+        btns = tk.Frame(frm)
+        btns.grid(row=1, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        tk.Button(btns, text="Schließen", command=win.destroy).pack(side="right")
+        tk.Button(btns, text="Öffnen", command=otevrit).pack(side="right", padx=(0, 8))
+
+        listbox.bind("<Double-1>", lambda e: otevrit())
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+        win.after(0, listbox.focus_set)
+
+    def _porucha_ordner_oeffnen(self, parent, porucha: dict):
+        folder = self._porucha_foto_slozka(porucha)
+        if not folder.is_dir():
+            messagebox.showinfo(T("Ordner", "Ordner"), "Kein Ordner vorhanden.", parent=parent)
+            return
+        otevrit_slozku(folder)
+
+    def _show_porucha_detail_dialog(self, parent, porucha: dict):
+        detail = tk.Toplevel(parent)
+        detail.title("Detail der Störung")
+        detail.transient(parent)
+        detail.resizable(False, False)
+
+        win_w = 820
+        win_h = 500
+        detail.geometry(f"{win_w}x{win_h}")
+        detail.update_idletasks()
+        parent_x = parent.winfo_rootx()
+        parent_y = parent.winfo_rooty()
+        parent_w = parent.winfo_width()
+        parent_h = parent.winfo_height()
+        pos_x = parent_x + max((parent_w - win_w) // 2, 0)
+        pos_y = parent_y + max((parent_h - win_h) // 2, 0)
+        detail.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+
+        status_text = porucha_stav_ui(porucha.get("stav", "")) or "-"
+        status_key = (porucha.get("stav") or "").strip().lower()
+        status_color = "#b00020" if status_key == "otevrena" else "#1f7a1f" if status_key == "uzavrena" else "black"
+        wrap = 610
+
+        frm_detail = tk.Frame(detail, padx=14, pady=14)
+        frm_detail.pack(fill="both", expand=True)
+        frm_detail.grid_columnconfigure(1, weight=1)
+
+        foto_var = tk.StringVar()
+
+        def refresh_photo_count():
+            foto_var.set(f"Fotos: {len(self._porucha_foto_paths(porucha))}")
+
+        radky = [
+            ("Datum/Zeit", porucha.get("cas", "") or "-", None),
+            ("Alarm", porucha.get("alarm", "") or "-", None),
+            ("Status", status_text, status_color),
+            ("Beschreibung", porucha.get("popis", "") or "-", None),
+            ("Lösung", porucha.get("reseni", "") or "-", None),
+        ]
+
+        for idx, (label, value, color) in enumerate(radky):
+            tk.Label(
+                frm_detail,
+                text=f"{label}:",
+                font=("Segoe UI", 9, "bold"),
+                anchor="nw",
+            ).grid(row=idx, column=0, sticky="nw", padx=(0, 12), pady=5)
+            tk.Label(
+                frm_detail,
+                text=value,
+                justify="left",
+                anchor="w",
+                wraplength=wrap,
+                fg=color or "black",
+            ).grid(row=idx, column=1, sticky="w", pady=5)
+
+        tk.Label(frm_detail, textvariable=foto_var, font=("Segoe UI", 9, "bold")).grid(
+            row=len(radky), column=1, sticky="w", pady=(8, 2)
+        )
+
+        detail_text = "\n".join([
+            f"Datum/Zeit: {porucha.get('cas', '') or '-'}",
+            f"Alarm: {porucha.get('alarm', '') or '-'}",
+            f"Status: {status_text}",
+            f"Beschreibung: {porucha.get('popis', '') or '-'}",
+            f"Lösung: {porucha.get('reseni', '') or '-'}",
+        ])
+
+        def kopirovat():
+            detail.clipboard_clear()
+            detail.clipboard_append(detail_text)
+            detail.update()
+            messagebox.showinfo("Info", "In die Zwischenablage kopiert.", parent=detail)
+
+        photo_btns = tk.Frame(frm_detail)
+        photo_btns.grid(row=len(radky) + 1, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        tk.Button(
+            photo_btns,
+            text="Ordner öffnen",
+            command=lambda: self._porucha_ordner_oeffnen(detail, porucha),
+        ).pack(side="right")
+        tk.Button(
+            photo_btns,
+            text="Fotos öffnen",
+            command=lambda: self._porucha_fotos_oeffnen(detail, porucha, on_change=refresh_photo_count),
+        ).pack(side="right", padx=(0, 8))
+        tk.Button(
+            photo_btns,
+            text="Foto hinzufügen",
+            command=lambda: self._porucha_foto_hinzufuegen(detail, porucha, on_change=refresh_photo_count),
+        ).pack(side="right", padx=(0, 8))
+
+        btns = tk.Frame(frm_detail)
+        btns.grid(row=len(radky) + 2, column=0, columnspan=2, sticky="e", pady=(16, 0))
+        btn = tk.Button(btns, text="Schließen", command=detail.destroy)
+        btn.pack(side="right")
+        copy_btn = tk.Button(btns, text="In Zwischenablage kopieren", command=kopirovat)
+        copy_btn.pack(side="right", padx=(0, 8))
+
+        refresh_photo_count()
+        detail.bind("<Escape>", lambda e: detail.destroy())
+        detail.bind("<Return>", lambda e: detail.destroy())
+        detail.protocol("WM_DELETE_WINDOW", detail.destroy)
+        detail.after(0, btn.focus_set)
 
     def prepnout_stav_toolbar(self):
         """Tlačítko z horní lišty – přepnutí stavu stroje běží/porucha"""
@@ -1971,12 +3605,281 @@ class StrojeGrid(StrojeGrid):  # rozšíření
         new_kat = ask_kategorie_combobox(parent)
         if new_kat is None:
             return
-        new_pop = simpledialog.askstring(T("Editace", "Bearbeiten"), T(
-            "Popis:", "Beschreibung:"), initialvalue=target.get("popis", ""), parent=parent)
+
+        def ask_beschreibung_dialog(parent_win, initial_text=""):
+            dlg = tk.Toplevel(parent_win)
+            dlg.title("Offene Störung bearbeiten")
+            dlg.transient(parent_win)
+            dlg.grab_set()
+            dlg.resizable(True, True)
+
+            win_w = 580
+            win_h = 300
+            dlg.geometry(f"{win_w}x{win_h}")
+            dlg.update_idletasks()
+            parent_x = parent_win.winfo_rootx()
+            parent_y = parent_win.winfo_rooty()
+            parent_w = parent_win.winfo_width()
+            parent_h = parent_win.winfo_height()
+            pos_x = parent_x + max((parent_w - win_w) // 2, 0)
+            pos_y = parent_y + max((parent_h - win_h) // 2, 0)
+            dlg.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+
+            frm = tk.Frame(dlg, padx=12, pady=12)
+            frm.pack(fill="both", expand=True)
+            frm.grid_columnconfigure(0, weight=1)
+            frm.grid_rowconfigure(1, weight=1)
+
+            tk.Label(frm, text="Beschreibung:").grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+            text_frame = tk.Frame(frm)
+            text_frame.grid(row=1, column=0, sticky="nsew")
+            text_frame.grid_columnconfigure(0, weight=1)
+            text_frame.grid_rowconfigure(0, weight=1)
+
+            txt = tk.Text(text_frame, height=7, wrap="word")
+            scroll = ttk.Scrollbar(text_frame, orient="vertical", command=txt.yview)
+            txt.configure(yscrollcommand=scroll.set)
+            txt.grid(row=0, column=0, sticky="nsew")
+            scroll.grid(row=0, column=1, sticky="ns")
+            if initial_text:
+                txt.insert("1.0", initial_text)
+
+            result = {"value": None}
+
+            def potvrdit():
+                result["value"] = txt.get("1.0", "end-1c").strip()
+                dlg.destroy()
+
+            def zrusit():
+                dlg.destroy()
+
+            btns = tk.Frame(frm)
+            btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
+            tk.Button(btns, text="Abbrechen", command=zrusit).pack(side="right")
+            tk.Button(btns, text="OK", command=potvrdit, width=10).pack(side="right", padx=(0, 8))
+
+            dlg.bind("<Escape>", lambda e: zrusit())
+            dlg.bind("<Control-Return>", lambda e: potvrdit())
+            dlg.protocol("WM_DELETE_WINDOW", zrusit)
+            dlg.after(0, txt.focus_set)
+            parent_win.wait_window(dlg)
+            return result["value"]
+
+        new_pop = ask_beschreibung_dialog(parent, target.get("popis", ""))
         if new_pop is None:
             return
 
         # Uložit změny
+        for p in por:
+            if p.get("id") == target.get("id"):
+                p["alarm"] = new_alarm
+                p["kategorie"] = new_kat
+                p["popis"] = new_pop
+                break
+        uloz_poruchy(por)
+        self.poruchy = por
+        messagebox.showinfo(T("Uloženo", "Gespeichert"),
+                            f"{T('Porucha', 'Störung')} ID {target.get('id')} {T('upravena', 'bearbeitet')}.", parent=parent)
+
+    def editovat_otevrenou_poruchu(self, parent, cislo: str):
+        por = nacti_poruchy()
+        opened = [p for p in por if p.get("cislo") == cislo and p.get("stav") == "otevrena"]
+        if not opened:
+            messagebox.showinfo(T("Editace", "Bearbeiten"), T(
+                "Žádná otevřená porucha u tohoto stroje.", "Keine offene Störung an dieser Maschine."), parent=parent)
+            return
+
+        def vyber_pro_editaci(parent_win, opened_items):
+            opened_sorted = sorted(
+                opened_items,
+                key=lambda p: (p.get("cas") or "", str(p.get("id") or "")),
+                reverse=True,
+            )
+            by_id = {str(p.get("id", "")).strip(): p for p in opened_sorted if str(p.get("id", "")).strip()}
+
+            def _zkrat(text, max_len=60):
+                text = (text or "").strip()
+                if len(text) <= max_len:
+                    return text or "-"
+                return text[: max_len - 3].rstrip() + "..."
+
+            dlg = tk.Toplevel(parent_win)
+            dlg.title("Offene Störung auswählen")
+            dlg.transient(parent_win)
+            dlg.grab_set()
+            dlg.resizable(True, True)
+            dlg.geometry("920x360")
+
+            frm = tk.Frame(dlg, padx=12, pady=12)
+            frm.pack(fill="both", expand=True)
+            frm.grid_columnconfigure(0, weight=1)
+            frm.grid_rowconfigure(1, weight=1)
+
+            tk.Label(
+                frm,
+                text="Bitte eine offene Störung zur Bearbeitung auswählen.",
+                font=("Segoe UI", 10, "bold"),
+            ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+
+            cols = ("id", "cas", "kategorie", "alarm", "popis")
+            tree_frame = tk.Frame(frm)
+            tree_frame.grid(row=1, column=0, sticky="nsew")
+            tree_frame.grid_rowconfigure(0, weight=1)
+            tree_frame.grid_columnconfigure(0, weight=1)
+
+            tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=10)
+            tree.heading("id", text="ID")
+            tree.heading("cas", text="Datum/Zeit")
+            tree.heading("kategorie", text="Kategorie")
+            tree.heading("alarm", text="Alarm")
+            tree.heading("popis", text="Beschreibung")
+            tree.column("id", width=60, anchor="center", stretch=False)
+            tree.column("cas", width=150, anchor="w", stretch=False)
+            tree.column("kategorie", width=120, anchor="w", stretch=False)
+            tree.column("alarm", width=120, anchor="w", stretch=False)
+            tree.column("popis", width=380, anchor="w", stretch=True)
+
+            yscroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+            xscroll = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+            tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+            tree.grid(row=0, column=0, sticky="nsew")
+            yscroll.grid(row=0, column=1, sticky="ns")
+            xscroll.grid(row=1, column=0, sticky="ew")
+
+            for p in opened_sorted:
+                iid = str(p.get("id", "")).strip()
+                if not iid:
+                    continue
+                kat_key = normalize_kategorie(p.get("kategorie", "") or "")
+                tree.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=(
+                        iid,
+                        p.get("cas", "") or "",
+                        kat_ui(kat_key),
+                        p.get("alarm", "") or "",
+                        _zkrat(p.get("popis", "") or ""),
+                    ),
+                )
+
+            if opened_sorted:
+                first_id = str(opened_sorted[0].get("id", "")).strip()
+                if first_id:
+                    tree.selection_set(first_id)
+                    tree.focus(first_id)
+
+            result = {"value": None}
+
+            def potvrdit():
+                selection = tree.selection()
+                if not selection:
+                    messagebox.showwarning("Warnung", "Bitte eine Störung auswählen.", parent=dlg)
+                    return
+                result["value"] = by_id.get(selection[0])
+                dlg.destroy()
+
+            def zrusit():
+                dlg.destroy()
+
+            def double_click(event):
+                iid = tree.identify_row(event.y)
+                if iid:
+                    tree.selection_set(iid)
+                    tree.focus(iid)
+                potvrdit()
+
+            btns = tk.Frame(frm)
+            btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
+            ttk.Button(btns, text="Abbrechen", width=12, command=zrusit).pack(side="right")
+            ttk.Button(btns, text="Bearbeiten", width=12, command=potvrdit).pack(side="right", padx=(0, 8))
+
+            tree.bind("<Double-1>", double_click)
+            dlg.bind("<Return>", lambda e: potvrdit())
+            dlg.bind("<Escape>", lambda e: zrusit())
+            dlg.protocol("WM_DELETE_WINDOW", zrusit)
+            dlg.after(0, tree.focus_set)
+            parent_win.wait_window(dlg)
+            return result["value"]
+
+        target = vyber_pro_editaci(parent, opened)
+        if target is None:
+            return
+
+        new_alarm = simpledialog.askstring(T("Editace", "Bearbeiten"), T(
+            "Alarm:", "Alarm:"), initialvalue=target.get("alarm", ""), parent=parent)
+        if new_alarm is None:
+            return
+        new_kat = ask_kategorie_combobox(parent)
+        if new_kat is None:
+            return
+
+        def ask_beschreibung_dialog(parent_win, initial_text=""):
+            dlg = tk.Toplevel(parent_win)
+            dlg.title("Offene Störung bearbeiten")
+            dlg.transient(parent_win)
+            dlg.grab_set()
+            dlg.resizable(True, True)
+
+            win_w = 580
+            win_h = 300
+            dlg.geometry(f"{win_w}x{win_h}")
+            dlg.update_idletasks()
+            parent_x = parent_win.winfo_rootx()
+            parent_y = parent_win.winfo_rooty()
+            parent_w = parent_win.winfo_width()
+            parent_h = parent_win.winfo_height()
+            pos_x = parent_x + max((parent_w - win_w) // 2, 0)
+            pos_y = parent_y + max((parent_h - win_h) // 2, 0)
+            dlg.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+
+            frm = tk.Frame(dlg, padx=12, pady=12)
+            frm.pack(fill="both", expand=True)
+            frm.grid_columnconfigure(0, weight=1)
+            frm.grid_rowconfigure(1, weight=1)
+
+            tk.Label(frm, text="Beschreibung:").grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+            text_frame = tk.Frame(frm)
+            text_frame.grid(row=1, column=0, sticky="nsew")
+            text_frame.grid_columnconfigure(0, weight=1)
+            text_frame.grid_rowconfigure(0, weight=1)
+
+            txt = tk.Text(text_frame, height=7, wrap="word")
+            scroll = ttk.Scrollbar(text_frame, orient="vertical", command=txt.yview)
+            txt.configure(yscrollcommand=scroll.set)
+            txt.grid(row=0, column=0, sticky="nsew")
+            scroll.grid(row=0, column=1, sticky="ns")
+            if initial_text:
+                txt.insert("1.0", initial_text)
+
+            result = {"value": None}
+
+            def potvrdit():
+                result["value"] = txt.get("1.0", "end-1c").strip()
+                dlg.destroy()
+
+            def zrusit():
+                dlg.destroy()
+
+            btns = tk.Frame(frm)
+            btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
+            tk.Button(btns, text="Abbrechen", command=zrusit).pack(side="right")
+            tk.Button(btns, text="OK", command=potvrdit, width=10).pack(side="right", padx=(0, 8))
+
+            dlg.bind("<Escape>", lambda e: zrusit())
+            dlg.bind("<Control-Return>", lambda e: potvrdit())
+            dlg.protocol("WM_DELETE_WINDOW", zrusit)
+            dlg.after(0, txt.focus_set)
+            parent_win.wait_window(dlg)
+            return result["value"]
+
+        new_pop = ask_beschreibung_dialog(parent, target.get("popis", ""))
+        if new_pop is None:
+            return
+
         for p in por:
             if p.get("id") == target.get("id"):
                 p["alarm"] = new_alarm
@@ -2226,6 +4129,128 @@ def vyber_otevrenou_poruchu_combo(parent, opened: list):
     if chosen["index"] is None:
         return None
     return opened[chosen["index"]]
+
+
+def vyber_otevrenou_poruchu_combo(parent, opened: list):
+    """
+    Vrátí vybraný záznam poruchy (dict) z listu 'opened' pomocí Treeview.
+    Pokud uživatel zruší, vrací None.
+    """
+    if not opened:
+        return None
+
+    opened_sorted = sorted(
+        opened,
+        key=lambda p: (p.get("cas") or "", str(p.get("id") or "")),
+        reverse=True,
+    )
+    by_id = {str(p.get("id", "")).strip(): p for p in opened_sorted if str(p.get("id", "")).strip()}
+
+    def _zkrat(text, max_len=60):
+        text = (text or "").strip()
+        if len(text) <= max_len:
+            return text or "-"
+        return text[: max_len - 3].rstrip() + "..."
+
+    top = tk.Toplevel(parent)
+    top.title("Störung schließen")
+    top.transient(parent)
+    top.grab_set()
+    top.resizable(True, True)
+    top.geometry("920x360")
+
+    frm = tk.Frame(top, padx=12, pady=12)
+    frm.pack(fill="both", expand=True)
+    frm.grid_columnconfigure(0, weight=1)
+    frm.grid_rowconfigure(1, weight=1)
+
+    tk.Label(
+        frm,
+        text="Bitte eine offene Störung zum Schließen auswählen.",
+        font=("Segoe UI", 10, "bold"),
+    ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+
+    cols = ("id", "cas", "kategorie", "alarm", "popis")
+    tree_frame = tk.Frame(frm)
+    tree_frame.grid(row=1, column=0, sticky="nsew")
+    tree_frame.grid_rowconfigure(0, weight=1)
+    tree_frame.grid_columnconfigure(0, weight=1)
+
+    tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=10)
+    tree.heading("id", text="ID")
+    tree.heading("cas", text="Datum/Zeit")
+    tree.heading("kategorie", text="Kategorie")
+    tree.heading("alarm", text="Alarm")
+    tree.heading("popis", text="Beschreibung")
+    tree.column("id", width=60, anchor="center", stretch=False)
+    tree.column("cas", width=150, anchor="w", stretch=False)
+    tree.column("kategorie", width=120, anchor="w", stretch=False)
+    tree.column("alarm", width=120, anchor="w", stretch=False)
+    tree.column("popis", width=380, anchor="w", stretch=True)
+
+    yscroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+    xscroll = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+    tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+    tree.grid(row=0, column=0, sticky="nsew")
+    yscroll.grid(row=0, column=1, sticky="ns")
+    xscroll.grid(row=1, column=0, sticky="ew")
+
+    for p in opened_sorted:
+        iid = str(p.get("id", "")).strip()
+        if not iid:
+            continue
+        kat_key = normalize_kategorie(p.get("kategorie", "") or "")
+        tree.insert(
+            "",
+            "end",
+            iid=iid,
+            values=(
+                iid,
+                p.get("cas", "") or "",
+                kat_ui(kat_key),
+                p.get("alarm", "") or "",
+                _zkrat(p.get("popis", "") or ""),
+            ),
+        )
+
+    if opened_sorted:
+        first_id = str(opened_sorted[0].get("id", "")).strip()
+        if first_id:
+            tree.selection_set(first_id)
+            tree.focus(first_id)
+
+    chosen = {"value": None}
+
+    def _ok():
+        selection = tree.selection()
+        if not selection:
+            messagebox.showwarning("Warnung", "Bitte eine Störung auswählen.", parent=top)
+            return
+        chosen["value"] = by_id.get(selection[0])
+        top.destroy()
+
+    def _cancel():
+        top.destroy()
+
+    def _double_click(event):
+        iid = tree.identify_row(event.y)
+        if iid:
+            tree.selection_set(iid)
+            tree.focus(iid)
+        _ok()
+
+    btns = tk.Frame(frm)
+    btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
+    ttk.Button(btns, text="Abbrechen", width=12, command=_cancel).pack(side="right")
+    ttk.Button(btns, text="Schließen", width=12, command=_ok).pack(side="right", padx=(0, 8))
+
+    top.bind("<Return>", lambda e: _ok())
+    top.bind("<Escape>", lambda e: _cancel())
+    top.protocol("WM_DELETE_WINDOW", _cancel)
+    tree.bind("<Double-1>", _double_click)
+    top.after(0, tree.focus_set)
+    parent.wait_window(top)
+    return chosen["value"]
 
 
 # ===== Main =====
