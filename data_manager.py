@@ -28,6 +28,19 @@ DATA_DIR.mkdir(exist_ok=True)
 SOUBOR_STROJE = DATA_DIR / "stroje.csv"
 SOUBOR_PORUCHY = DATA_DIR / "poruchy.csv"
 SOUBOR_SABLONY = DATA_DIR / "sablony_alarmu.csv"
+PORUCHY_FIELDNAMES = [
+    "alarm",
+    "cas",
+    "cas_uzavreni",
+    "cislo",
+    "id",
+    "kategorie",
+    "operator_uzavrel",
+    "popis",
+    "reseni",
+    "stav",
+    "typ",
+]
 
 
 def slozka_stroje(cislo: str) -> Path:
@@ -103,9 +116,24 @@ def nacti_poruchy():
 
 
 def uloz_poruchy(poruchy: list):
-    if not poruchy:
-        return
-    fieldnames = sorted({k for row in poruchy for k in row.keys()})
+    fieldnames = list(PORUCHY_FIELDNAMES)
+    if poruchy:
+        extra = sorted(
+            {
+                key
+                for row in poruchy
+                for key in row.keys()
+                if key not in fieldnames
+            }
+        )
+        fieldnames.extend(extra)
+    elif SOUBOR_PORUCHY.exists():
+        with open(SOUBOR_PORUCHY, newline="", encoding="utf-8") as f:
+            existing = csv.reader(f)
+            existing_header = next(existing, [])
+        if existing_header:
+            fieldnames = existing_header
+
     with open(SOUBOR_PORUCHY, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
