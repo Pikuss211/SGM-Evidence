@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import csv
+import hashlib
+import io
+import json
+import logging
 import os
+import shutil
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
+from pathlib import PurePosixPath
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
 from data_manager import (
     DATA_DIR,
-    SOUBOR_PORUCHY,
-    SOUBOR_SABLONY,
-    SOUBOR_STROJE,
+    T,
     days_to_next_wartung,
     kat_ui,
-    nacti_stroje,
     nacti_poruchy,
+    nacti_stroje,
     slozka_stroje,
 )
 
-
-LANG = os.environ.get("SGM_LANG", "de").strip().lower()
-
-
-def T(cz: str, de: str | None = None) -> str:
-    if LANG.upper() == "DE":
-        return de if de is not None else cz
-    return cz
+LOGGER = logging.getLogger("sgm.export")
+BACKUP_FORMAT_VERSION = 2
+BACKUP_MANIFEST = "sgm_backup_manifest.json"
 
 
 def vyber_fotky_dialog(parent, image_paths: list):
@@ -626,8 +627,268 @@ def export_poruchy_pdf(parent, cislo: str, stroje: dict, alarm_filter: str | Non
     )
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256_zip_member(archive: zipfile.ZipFile, member: str) -> str:
+    digest = hashlib.sha256()
+    with archive.open(member) as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _backup_files(data_dir: Path):
+    for path in sorted(data_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(data_dir)
+        if relative.parts and relative.parts[0].lower() == "logs":
+            continue
+        if path.name.endswith(".tmp"):
+            continue
+        yield path, relative
+
+
+def create_backup_archive(destination: Path, data_dir: Path = DATA_DIR) -> Path:
+    """Vytvoří úplnou ověřitelnou ZIP zálohu uživatelských dat."""
+    destination = Path(destination)
+    data_dir = Path(data_dir)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination_resolved = destination.resolve()
+    files = [
+        (path, relative)
+        for path, relative in _backup_files(data_dir)
+        if path.resolve() != destination_resolved
+    ]
+    manifest = {
+        "format": BACKUP_FORMAT_VERSION,
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "files": {
+            relative.as_posix(): {
+                "size": path.stat().st_size,
+                "sha256": _sha256_file(path),
+            }
+            for path, relative in files
+        },
+    }
+
+    temp_path = destination.with_name(f".{destination.name}.tmp")
+    try:
+        with zipfile.ZipFile(
+            temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+        ) as archive:
+            for path, relative in files:
+                archive.write(path, arcname=f"data/{relative.as_posix()}")
+            archive.writestr(
+                BACKUP_MANIFEST,
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+            )
+        inspect_backup_archive(temp_path, validate_data=False)
+        os.replace(temp_path, destination)
+        return destination
+    except Exception:
+        LOGGER.exception("Vytvoření zálohy selhalo: %s", destination)
+        raise
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _safe_zip_name(name: str) -> PurePosixPath:
+    if "\\" in name:
+        raise ValueError(f"Neplatná cesta v ZIP: {name}")
+    path = PurePosixPath(name)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"Neplatná cesta v ZIP: {name}")
+    if path.parts and ":" in path.parts[0]:
+        raise ValueError(f"Neplatná cesta v ZIP: {name}")
+    return path
+
+
+def _validate_csv_bytes(content: bytes, required: set[str], name: str) -> None:
+    try:
+        text = content.decode("utf-8-sig")
+        header = next(csv.reader(io.StringIO(text)), [])
+    except (UnicodeDecodeError, csv.Error) as exc:
+        raise ValueError(f"Soubor {name} není platné UTF-8 CSV.") from exc
+    missing = required.difference(header)
+    if missing:
+        raise ValueError(
+            f"Soubor {name} nemá povinné sloupce: {', '.join(sorted(missing))}"
+        )
+
+
+def inspect_backup_archive(archive_path: Path, *, validate_data: bool = True) -> dict:
+    """Ověří bezpečnost, CSV strukturu a kontrolní součty zálohy."""
+    archive_path = Path(archive_path)
+    with zipfile.ZipFile(archive_path) as archive:
+        infos = [info for info in archive.infolist() if not info.is_dir()]
+        if len(infos) > 100_000:
+            raise ValueError("Záloha obsahuje nepřiměřeně mnoho souborů.")
+        total_size = sum(info.file_size for info in infos)
+        if total_size > 20 * 1024**3:
+            raise ValueError("Rozbalená záloha je větší než 20 GB.")
+        for info in infos:
+            _safe_zip_name(info.filename)
+        broken = archive.testzip()
+        if broken:
+            raise ValueError(f"ZIP je poškozený: {broken}")
+
+        names = {info.filename for info in infos}
+        if len(names) != len(infos):
+            raise ValueError("Záloha obsahuje duplicitní názvy souborů.")
+        is_current = BACKUP_MANIFEST in names
+        if is_current:
+            try:
+                manifest = json.loads(archive.read(BACKUP_MANIFEST))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("Manifest zálohy je poškozený.") from exc
+            if manifest.get("format") != BACKUP_FORMAT_VERSION:
+                raise ValueError("Nepodporovaná verze zálohy.")
+            manifest_files = manifest.get("files")
+            if not isinstance(manifest_files, dict):
+                raise ValueError("Manifest neobsahuje seznam souborů.")
+            for relative, metadata in manifest_files.items():
+                if not isinstance(relative, str) or not isinstance(metadata, dict):
+                    raise ValueError("Manifest obsahuje neplatný záznam souboru.")
+                _safe_zip_name(relative)
+                member = f"data/{relative}"
+                if member not in names:
+                    raise ValueError(f"V záloze chybí soubor: {relative}")
+                if archive.getinfo(member).file_size != metadata.get("size"):
+                    raise ValueError(f"Nesouhlasí velikost souboru: {relative}")
+                checksum = _sha256_zip_member(archive, member)
+                if checksum != metadata.get("sha256"):
+                    raise ValueError(f"Nesouhlasí kontrolní součet: {relative}")
+            entries = {
+                relative: f"data/{relative}" for relative in manifest_files.keys()
+            }
+            archive_type = "complete"
+        else:
+            legacy = ("stroje.csv", "poruchy.csv", "sablony_alarmu.csv")
+            entries = {name: name for name in legacy if name in names}
+            archive_type = "legacy"
+
+        if validate_data:
+            for required_name in ("stroje.csv", "poruchy.csv"):
+                if required_name not in entries:
+                    raise ValueError(
+                        f"V záloze chybí povinný soubor {required_name}."
+                    )
+            _validate_csv_bytes(
+                archive.read(entries["stroje.csv"]), {"cislo"}, "stroje.csv"
+            )
+            _validate_csv_bytes(
+                archive.read(entries["poruchy.csv"]),
+                {"id", "cislo", "stav"},
+                "poruchy.csv",
+            )
+        return {
+            "type": archive_type,
+            "entries": entries,
+            "file_count": len(entries),
+            "total_size": sum(
+                archive.getinfo(member).file_size for member in entries.values()
+            ),
+        }
+
+
+def _copy_file_atomic(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = destination.parent / f".{destination.name}.restore.tmp"
+    try:
+        shutil.copy2(source, temp_path)
+        os.replace(temp_path, destination)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def restore_backup_archive(
+    archive_path: Path,
+    data_dir: Path = DATA_DIR,
+    safety_backup_dir: Path | None = None,
+) -> Path:
+    """Obnoví soubory ze ZIP a při chybě vrátí již změněné soubory zpět."""
+    archive_path = Path(archive_path)
+    data_dir = Path(data_dir)
+    info = inspect_backup_archive(archive_path)
+    safety_backup_dir = (
+        Path(safety_backup_dir)
+        if safety_backup_dir is not None
+        else data_dir.parent / "backups"
+    )
+    safety_backup_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    safety_path = safety_backup_dir / f"pred_obnovou_{timestamp}.zip"
+    create_backup_archive(safety_path, data_dir)
+
+    stage_root = data_dir.parent / ".sgm_restore_work"
+    if stage_root.exists():
+        shutil.rmtree(stage_root)
+    stage_root.mkdir(parents=True)
+    rollback_root = stage_root / "rollback"
+    incoming_root = stage_root / "incoming"
+    changed = []
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            for relative_text, member in info["entries"].items():
+                relative = Path(*PurePosixPath(relative_text).parts)
+                incoming = incoming_root / relative
+                incoming.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as source, open(incoming, "wb") as target:
+                    shutil.copyfileobj(source, target)
+
+        _validate_csv_bytes(
+            (incoming_root / "stroje.csv").read_bytes(), {"cislo"}, "stroje.csv"
+        )
+        _validate_csv_bytes(
+            (incoming_root / "poruchy.csv").read_bytes(),
+            {"id", "cislo", "stav"},
+            "poruchy.csv",
+        )
+
+        for relative_text in info["entries"]:
+            relative = Path(*PurePosixPath(relative_text).parts)
+            destination = data_dir / relative
+            rollback = rollback_root / relative
+            existed = destination.exists()
+            if existed:
+                rollback.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(destination, rollback)
+            changed.append((destination, rollback, existed))
+            _copy_file_atomic(incoming_root / relative, destination)
+        LOGGER.info(
+            "Data obnovena z %s; bezpečnostní záloha: %s",
+            archive_path,
+            safety_path,
+        )
+        return safety_path
+    except Exception:
+        LOGGER.exception("Obnova zálohy selhala, probíhá návrat změn")
+        for destination, rollback, existed in reversed(changed):
+            try:
+                if existed:
+                    _copy_file_atomic(rollback, destination)
+                else:
+                    destination.unlink(missing_ok=True)
+            except Exception:
+                LOGGER.critical(
+                    "Návrat souboru po chybě obnovy selhal: %s",
+                    destination,
+                    exc_info=True,
+                )
+        raise
+    finally:
+        shutil.rmtree(stage_root, ignore_errors=True)
+
+
 def backup_zip(parent=None):
-    ts = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fname = filedialog.asksaveasfilename(
         parent=parent,
         defaultextension=".zip",
@@ -635,10 +896,18 @@ def backup_zip(parent=None):
     )
     if not fname:
         return False
-    with zipfile.ZipFile(fname, "w") as z:
-        for p in [SOUBOR_STROJE, SOUBOR_PORUCHY, SOUBOR_SABLONY]:
-            if p.exists():
-                z.write(p, arcname=p.name)
+    try:
+        create_backup_archive(Path(fname))
+    except Exception as exc:
+        messagebox.showerror(
+            T("Záloha", "Sicherung"),
+            T(
+                f"Zálohu se nepodařilo vytvořit:\n{exc}",
+                f"Sicherung konnte nicht erstellt werden:\n{exc}",
+            ),
+            parent=parent,
+        )
+        return False
     messagebox.showinfo(
         T("Záloha", "Sicherung"),
         f"{T('Uloženo', 'Gespeichert')} {fname}",
@@ -651,14 +920,58 @@ def restore_zip(parent=None):
     fname = filedialog.askopenfilename(parent=parent, filetypes=[("ZIP", "*.zip")])
     if not fname:
         return False
-    with zipfile.ZipFile(fname) as z:
-        for name in ["stroje.csv", "poruchy.csv", "sablony_alarmu.csv"]:
-            if name in z.namelist():
-                with z.open(name) as src, open(DATA_DIR / name, "wb") as dst:
-                    dst.write(src.read())
+    try:
+        info = inspect_backup_archive(Path(fname))
+    except Exception as exc:
+        LOGGER.warning("Odmítnuta neplatná záloha %s", fname, exc_info=True)
+        messagebox.showerror(
+            T("Obnova", "Wiederherstellung"),
+            T(
+                f"Záloha není platná a nebude obnovena:\n{exc}",
+                f"Die Sicherung ist ungültig und wird nicht wiederhergestellt:\n{exc}",
+            ),
+            parent=parent,
+        )
+        return False
+
+    kind = (
+        T("úplná", "vollständig")
+        if info["type"] == "complete"
+        else T("starší – pouze CSV", "älter – nur CSV")
+    )
+    if not messagebox.askyesno(
+        T("Potvrdit obnovu", "Wiederherstellung bestätigen"),
+        T(
+            f"Typ zálohy: {kind}\nPočet souborů: {info['file_count']}\n\n"
+            "Před obnovou se automaticky uloží úplná kopie současných dat. "
+            "Pokračovat?",
+            f"Sicherungstyp: {kind}\nDateien: {info['file_count']}\n\n"
+            "Vor der Wiederherstellung wird automatisch eine vollständige Kopie "
+            "der aktuellen Daten erstellt. Fortfahren?",
+        ),
+        parent=parent,
+    ):
+        return False
+
+    try:
+        safety_path = restore_backup_archive(Path(fname))
+    except Exception as exc:
+        messagebox.showerror(
+            T("Obnova", "Wiederherstellung"),
+            T(
+                f"Obnova selhala; provedené změny byly vráceny:\n{exc}",
+                f"Wiederherstellung fehlgeschlagen; Änderungen wurden "
+                f"zurückgesetzt:\n{exc}",
+            ),
+            parent=parent,
+        )
+        return False
     messagebox.showinfo(
         T("Obnova", "Wiederherstellung"),
-        T("Data obnovena.", "Daten wiederhergestellt."),
+        T(
+            f"Data obnovena.\nNávratová záloha:\n{safety_path}",
+            f"Daten wiederhergestellt.\nRücksicherung:\n{safety_path}",
+        ),
         parent=parent,
     )
     return True
@@ -682,7 +995,7 @@ def export_wartung_csv(parent):
         elif mode == T("≤ 30 dní", "≤ 30 Tage"):
             if dny > 30:
                 continue
-        elif mode == T("vše s Wartung", "Alle mit Wartung"):
+        elif mode == T("vše s údržbou", "Alle mit Wartung"):
             pass
         else:
             if dny > 30:
@@ -715,7 +1028,7 @@ def export_wartung_csv(parent):
 
     if not rows:
         messagebox.showinfo(
-            T("Wartung", "Wartung"),
+            T("Údržba", "Wartung"),
             T(
                 "Není žádný stroj odpovídající zvolenému filtru.",
                 "Keine Maschine entspricht dem gewählten Filter.",
@@ -731,7 +1044,7 @@ def export_wartung_csv(parent):
         defaultextension=".csv",
         filetypes=[("CSV", "*.csv")],
         initialfile="SGM_Wartung_seznam.csv",
-        title=T("Uložit seznam Wartung", "Wartungsliste speichern"),
+        title=T("Uložit seznam údržby", "Wartungsliste speichern"),
     )
     if not fname:
         return False
@@ -757,8 +1070,8 @@ def export_wartung_csv(parent):
         w.writerows(rows)
 
     messagebox.showinfo(
-        T("Wartung", "Wartung"),
-        f"{T('Seznam strojů pro Wartung byl uložen do', 'Liste der Maschinen für Wartung gespeichert in')}:\n{fname}",
+        T("Údržba", "Wartung"),
+        f"{T('Seznam strojů pro údržbu byl uložen do', 'Liste der Maschinen für Wartung gespeichert in')}:\n{fname}",
         parent=parent,
     )
     return True

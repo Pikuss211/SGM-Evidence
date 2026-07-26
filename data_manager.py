@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import csv
+import logging
 import os
+import shutil
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -41,6 +43,45 @@ PORUCHY_FIELDNAMES = [
     "stav",
     "typ",
 ]
+LOGGER = logging.getLogger("sgm.data")
+
+
+def _atomic_csv_write(path: Path, fieldnames: list[str], rows) -> None:
+    """Zapíše CSV bezpečně přes dočasný soubor ve stejné složce."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    try:
+        with open(
+            temp_path,
+            "w",
+            newline="",
+            encoding="utf-8",
+        ) as tmp:
+            writer = csv.DictWriter(tmp, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+
+        # Ověření, že dočasný soubor obsahuje očekávanou CSV hlavičku.
+        with open(temp_path, newline="", encoding="utf-8") as check:
+            actual_header = next(csv.reader(check), [])
+        if actual_header != fieldnames:
+            raise OSError(f"Neplatná CSV hlavička v {temp_path.name}")
+
+        if path.exists():
+            shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+        os.replace(temp_path, path)
+    except Exception:
+        LOGGER.exception("Bezpečné uložení CSV selhalo: %s", path)
+        raise
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            LOGGER.warning(
+                "Dočasný soubor nešel odstranit: %s", temp_path, exc_info=True
+            )
 
 
 def slozka_stroje(cislo: str) -> Path:
@@ -68,6 +109,8 @@ def nacti_stroje():
 
             row.setdefault("wartung_last", "")
             row.setdefault("wartung_interval", "180")
+            if not str(row.get("archivovan", "") or "").strip():
+                row["archivovan"] = "0"
 
             stroje[cislo] = row
         return stroje
@@ -84,16 +127,16 @@ def uloz_stroje(stroje: dict):
         "stav",
         "wartung_last",
         "wartung_interval",
+        "archivovan",
     ]
 
-    with open(SOUBOR_STROJE, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-
-        for cislo, s in stroje.items():
-            row = dict(s)
-            row["cislo"] = cislo
-            w.writerow(row)
+    rows = []
+    for cislo, s in stroje.items():
+        row = dict(s)
+        row["cislo"] = cislo
+        row["archivovan"] = "1" if is_archived_machine(row) else "0"
+        rows.append(row)
+    _atomic_csv_write(SOUBOR_STROJE, fieldnames, rows)
 
 
 def nacti_poruchy():
@@ -134,10 +177,7 @@ def uloz_poruchy(poruchy: list):
         if existing_header:
             fieldnames = existing_header
 
-    with open(SOUBOR_PORUCHY, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        w.writerows(poruchy)
+    _atomic_csv_write(SOUBOR_PORUCHY, fieldnames, poruchy)
 
 
 def nacti_sablony():
@@ -214,13 +254,6 @@ def kat_ui(kat: str) -> str:
     if k == "mechanicka":
         return T("mechanická", "mechanisch")
     return T("jiná", "sonstige")
-
-
-def _safe_int(s, default=10**9) -> int:
-    try:
-        return int(str(s).strip())
-    except Exception:
-        return default
 
 
 def days_to_next_wartung(stroj: dict):
@@ -305,6 +338,11 @@ def next_free_machine_number(stroje: dict) -> str:
     while n in used:
         n += 1
     return str(n)
+
+
+def is_archived_machine(stroj: dict) -> bool:
+    value = str(stroj.get("archivovan", "0") or "0").strip().lower()
+    return value in ("1", "ano", "true", "yes", "ja", "archivovan", "archiviert")
 
 
 def barva_dlazdice(stav: str, open_count: int, cislo: str, poruchy: list) -> str:

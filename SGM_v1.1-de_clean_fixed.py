@@ -11,13 +11,22 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 import data_manager as dm
 import export_manager as em
+import audit_manager as audit
+import audit_ui
+import operator_manager
+import operator_ui
+import validation_ui
+from app_logging import configure_logging, install_tk_exception_handler
 
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
+APP_NAME = "SGM Evidence"
+APP_VERSION = "1.2.0"
 
-SOUBOR_STROJE = DATA_DIR / "stroje.csv"
-SOUBOR_PORUCHY = DATA_DIR / "poruchy.csv"
-SOUBOR_SABLONY = DATA_DIR / "sablony_alarmu.csv"
+
+def bundled_resource(*parts: str) -> Path:
+    """Vrátí cestu k assetu ve zdrojové i PyInstaller verzi."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base.joinpath(*parts)
+
 
 # --- Přepínač emoji v UI (0 = vypnout emoji, 1 = zapnout) ---
 USE_EMOJI = os.environ.get("SGM_USE_EMOJI", "1") != "0"
@@ -31,14 +40,7 @@ def UI(emoji_text: str, plain_text: str) -> str:
 
 # --- Jazyk UI (CZ/DE) ---
 # Interní klíče (cislo, stav, kategorie, ...) se NIKDY nepřekládají.
-LANG = os.environ.get("SGM_LANG", "de").strip().lower()
-
-
-def T(cz: str, de: str | None = None) -> str:
-    """Překlad pro UI. Když DE chybí, použije se CZ."""
-    if LANG.upper() == "DE":
-        return de if de is not None else cz
-    return cz
+T = dm.T
 
 
 STAV_LABELS = {
@@ -75,17 +77,6 @@ TILE_FIELD_LABELS = {
 TILE_FIELD_BY_LABEL = {v: k for k, v in TILE_FIELD_LABELS.items()}
 
 
-# --- Správná cesta k datům (funguje i pro .exe z PyInstalleru) ---
-if getattr(sys, "frozen", False):  # běží jako EXE
-    BASE_DIR = Path(sys.executable).parent
-else:
-    BASE_DIR = Path(__file__).parent
-
-DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
-
-SOUBOR_STROJE = DATA_DIR / "stroje.csv"
-
 # --- Složky pro soubory strojů (fotky, dokumenty) ---
 
 
@@ -101,9 +92,6 @@ def otevrit_slozku(cesta: Path):
         messagebox.showerror(
             T("Chyba", "Fehler"), f"{T('Nepodařilo se otevřít složku', 'Ordner konnte nicht geöffnet werden')}:\n{e}")
 
-
-SOUBOR_PORUCHY = DATA_DIR / "poruchy.csv"
-SOUBOR_SABLONY = DATA_DIR / "sablony_alarmu.csv"
 # --------------------------------------------------------------
 
 # Pomocné funkce pro práci se soubory
@@ -198,16 +186,16 @@ def install_text_context_menu(root: tk.Misc):
         editable = _is_editable(widget)
         menu.delete(0, "end")
         menu.add_command(
-            label="Ausschneiden",
+            label=T("Vyjmout", "Ausschneiden"),
             command=lambda w=widget: w.event_generate("<<Cut>>"),
             state=("normal" if editable else "disabled"),
         )
         menu.add_command(
-            label="Kopieren",
+            label=T("Kopírovat", "Kopieren"),
             command=lambda w=widget: w.event_generate("<<Copy>>"),
         )
         menu.add_command(
-            label="Einfügen",
+            label=T("Vložit", "Einfügen"),
             command=lambda w=widget: w.event_generate("<<Paste>>"),
             state=("normal" if editable else "disabled"),
         )
@@ -222,7 +210,7 @@ def install_text_context_menu(root: tk.Misc):
                 w.selection_range(0, "end")
                 w.icursor("end")
 
-        menu.add_command(label="Alles markieren", command=_select_all)
+        menu.add_command(label=T("Vybrat vše", "Alles markieren"), command=_select_all)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -426,7 +414,6 @@ DATA_DIR = dm.DATA_DIR
 SOUBOR_PORUCHY = dm.SOUBOR_PORUCHY
 SOUBOR_SABLONY = dm.SOUBOR_SABLONY
 SOUBOR_STROJE = dm.SOUBOR_STROJE
-_safe_int = dm._safe_int
 barva_dlazdice = dm.barva_dlazdice
 color_by_cat = dm.color_by_cat
 days_to_next_wartung = dm.days_to_next_wartung
@@ -450,11 +437,23 @@ export_poruchy_pdf = em.export_poruchy_pdf
 vyber_fotky_dialog = em.vyber_fotky_dialog
 vyber_fotky_dialog_bez_miniatur = em.vyber_fotky_dialog_bez_miniatur
 
-class StrojeGrid(tk.Tk):
+class StrojeGridBase(tk.Tk):
     def __init__(self):
         super().__init__()
         install_text_context_menu(self)
-        self.title(T("SGM – přehled strojů", "SGM – Maschinenübersicht"))
+        self.title(
+            T(
+                f"{APP_NAME} {APP_VERSION} – přehled strojů",
+                f"{APP_NAME} {APP_VERSION} – Maschinenübersicht",
+            )
+        )
+        try:
+            self.iconbitmap(
+                default=str(bundled_resource("assets", "sgm_jokey.ico"))
+            )
+        except tk.TclError:
+            # Na některých ne-Windows Tk sestaveních není formát ICO podporován.
+            pass
         self.geometry("1200x740")
         self.configure(bg="#e9f2f7")
         self.sort_mode = tk.StringVar(value="cislo")
@@ -466,15 +465,18 @@ class StrojeGrid(tk.Tk):
 
         # === DATA ===
         self.stroje = nacti_stroje()     # dict cislo -> dict
-        # jméno operátora (start: Windows login)
-        self.operator = os.getenv("USERNAME", "")
+        # Jméno operátora se při skutečném spuštění ještě potvrdí v dialogu.
+        self.operator = operator_manager.initial_operator()
         self.poruchy = nacti_poruchy()    # list
         self.sablony = nacti_sablony()    # dict alarm -> reseni
         # --- STAV UI (musí být připraveno před tvorbou widgetů) ---
         self.status = tk.StringVar(value=T("Zadej číslo a Enter (nebo dvojklik). N = přidat stroj.",
                                            "Nummer eingeben und Enter (oder Doppelklick). N = Maschine hinzufügen."))
+        self.operator_display = tk.StringVar()
+        self._refresh_operator_display()
         self.filter_only_problem = tk.BooleanVar(
             value=False)  # jen stroje s otevřenou poruchou
+        self.show_archived = tk.BooleanVar(value=False)
         self.last_selected = None
         self.vstup_str = ""  # číselný vstup z klávesnice
         self._resize_after_id = None
@@ -500,6 +502,8 @@ class StrojeGrid(tk.Tk):
                   command=self.backup_zip).pack(side="left", padx=(10, 0), pady=6)
         tk.Button(top, text=UIT("⤓", T("Obnovit", "Wiederh.")),
                   command=self.restore_zip).pack(side="left", padx=(6, 0), pady=6)
+        tk.Button(top, text=UIT("✓", T("Kontrola dat", "Datenprüf.")),
+                  command=self.kontrola_dat_gui).pack(side="left", padx=(6, 0), pady=6)
         tk.Button(top, text=UIT("🔎", T("Hledat poruchy", "Stör. suchen")),
                   command=self.global_search_gui).pack(side="left", padx=(10, 0), pady=6)
         tk.Button(top, text=T("Hromadně uzavřít", "Sammel-Schl."),
@@ -550,7 +554,7 @@ class StrojeGrid(tk.Tk):
         rightgrp = tk.Frame(top, bg="#e9f2f7")
         rightgrp.pack(side="right", padx=(6, 10))
 
-        tk.Label(rightgrp, text=T("Data Ma:", "Daten Ma:"),
+        tk.Label(rightgrp, text=T("Údaj na dlaždici:", "Daten Ma:"),
                  bg="#e9f2f7").pack(side="left")
 
         # Popisek dlaždice: interně držíme klíče, v menu zobrazíme přeložené názvy
@@ -597,13 +601,23 @@ class StrojeGrid(tk.Tk):
         statusbar = tk.Frame(self, bg="#eef5fb")
         statusbar.pack(fill="x")
         tk.Label(statusbar, textvariable=self.status, bg="#eef5fb",
-                 font=("Segoe UI", 11)).pack(side="left", padx=10, pady=4)
+                  font=("Segoe UI", 11)).pack(side="left", padx=10, pady=4)
+        tk.Button(
+            statusbar,
+            text=T("Historie změn", "Änderungsverlauf"),
+            command=lambda: audit_ui.open_audit_history(self),
+        ).pack(side="right", padx=10, pady=2)
+        tk.Button(
+            statusbar,
+            textvariable=self.operator_display,
+            command=self.vybrat_operatora_gui,
+        ).pack(side="right", padx=(4, 0), pady=2)
 
         # === WARTUNG – EXPORT PANEL ================================================
         wartung_bar = tk.Frame(self, bg="#e9f2f7")
         wartung_bar.pack(fill="x", padx=10, pady=(4, 2))
 
-        tk.Label(wartung_bar, text=T("Wartung export:", "Wartung Export:"), bg="#e9f2f7").pack(
+        tk.Label(wartung_bar, text=T("Export údržby:", "Wartung Export:"), bg="#e9f2f7").pack(
             side="left", padx=(0, 6)
         )
 
@@ -612,14 +626,14 @@ class StrojeGrid(tk.Tk):
             wartung_bar,
             textvariable=self.wartung_mode,
             values=[T("prošlé", "überfällig"), T("≤ 30 dní", "≤ 30 Tage"), T(
-                "vše s Wartung", "Alle mit Wartung")],
+                "vše s údržbou", "Alle mit Wartung")],
             state="readonly",
             width=12,
         ).pack(side="left", padx=(0, 6), pady=2)
 
         tk.Button(
             wartung_bar,
-            text=T("Export Wartung", "Wartung export"),
+            text=T("Export údržby", "Wartung export"),
             command=self.export_wartung_csv,
         ).pack(side="left", padx=(0, 6), pady=2)
 
@@ -673,6 +687,13 @@ class StrojeGrid(tk.Tk):
             self._filter_buttons[key] = btn
 
         _refresh_filter_buttons()
+        tk.Checkbutton(
+            filtr,
+            text=T("Zobrazit archivované", "Archivierte anzeigen"),
+            variable=self.show_archived,
+            bg="#e9f2f7",
+            command=self.nakresli_mrizku,
+        ).pack(side="right", padx=(10, 0))
 
         wrap = tk.Frame(self, bg="#e9f2f7")
         wrap.pack(fill="both", expand=True, padx=10, pady=10)
@@ -716,7 +737,7 @@ class StrojeGrid(tk.Tk):
         self.sort_mode.trace_add("write", lambda *_: self.nakresli_mrizku())
 
         self.filter_only_problem = tk.BooleanVar(value=False)
-        tk.Checkbutton(top, text=T("Defekte Ma", "Defekte Ma"), variable=self.filter_only_problem,
+        tk.Checkbutton(top, text=T("Poruchové stroje", "Defekte Ma"), variable=self.filter_only_problem,
                        bg="#e9f2f7", command=self.nakresli_mrizku).pack(side="left", padx=(10, 0))
 
         tk.Button(top, text=f"📊 {T('Statistiky', 'Statistik')}",
@@ -727,6 +748,74 @@ class StrojeGrid(tk.Tk):
     def _focus_in_text_input(self):
         w = self.focus_get()
         return isinstance(w, (tk.Entry, tk.Text, tk.Spinbox))
+
+    def _refresh_operator_display(self):
+        if hasattr(self, "operator_display"):
+            self.operator_display.set(
+                f"{T('Operátor', 'Operator')}: {self.operator or '—'}"
+            )
+
+    def vybrat_operatora_gui(self, required: bool = False) -> bool:
+        settings = operator_manager.load_settings()
+        selected = operator_ui.choose_operator(
+            self,
+            self.operator,
+            settings["operators"],
+            required=required,
+        )
+        if selected is None:
+            return False
+        try:
+            operator_manager.remember_operator(selected)
+        except Exception as exc:
+            messagebox.showwarning(
+                T("Operátor", "Operator"),
+                T(
+                    f"Operátor byl nastaven pouze pro tuto relaci.\n"
+                    f"Nastavení se nepodařilo uložit:\n{exc}",
+                    f"Der Operator wurde nur für diese Sitzung gesetzt.\n"
+                    f"Die Einstellung konnte nicht gespeichert werden:\n{exc}",
+                ),
+                parent=self,
+            )
+        self.operator = selected
+        self._refresh_operator_display()
+        self.status.set(
+            T(
+                f"Aktivní operátor: {selected}",
+                f"Aktiver Operator: {selected}",
+            )
+        )
+        return True
+
+    def _audit_event(
+        self,
+        action: str,
+        entity_type: str,
+        *,
+        entity_id: str = "",
+        machine_number: str = "",
+        details: dict | None = None,
+    ):
+        try:
+            return audit.record_event(
+                action,
+                entity_type,
+                entity_id=entity_id,
+                machine_number=machine_number,
+                operator=getattr(self, "operator", ""),
+                details=details,
+            )
+        except Exception:
+            audit.LOGGER.exception("Auditní událost se nepodařila uložit")
+            if hasattr(self, "status"):
+                self.status.set(
+                    T(
+                        "Změna byla provedena, ale auditní záznam se nepodařilo uložit.",
+                        "Änderung durchgeführt, Auditprotokoll konnte aber nicht gespeichert werden.",
+                    )
+                )
+            return None
 
     def _on_grid_frame_configure(self, event=None):
         if self._scrollregion_after_id is None:
@@ -851,7 +940,10 @@ class StrojeGrid(tk.Tk):
 
         tk.Label(
             outer,
-            text="Top Maschinen nach Anzahl der Störungen.",
+            text=T(
+                "Nejčastěji poruchové stroje podle počtu záznamů.",
+                "Top Maschinen nach Anzahl der Störungen.",
+            ),
             font=("Segoe UI", 10, "bold"),
         ).pack(anchor="w", pady=(0, 10))
 
@@ -982,13 +1074,19 @@ class StrojeGrid(tk.Tk):
     def _get_visible_machine_numbers(self, counts_open, counts_30d, counts_all):
         # seznam čísel strojů (jen číslice)
         cisla = []
-        for k in self.stroje.keys():
+        include_archived = self.show_archived.get() if hasattr(
+            self, "show_archived"
+        ) else False
+        for k, machine in self.stroje.items():
             ks = str(k).strip()
-            if ks.isdigit():
+            if ks.isdigit() and (
+                include_archived or not dm.is_archived_machine(machine)
+            ):
                 cisla.append(int(ks))
 
         # filtr: jen problémové
-        if getattr(self, "filter_only_problem", tk.BooleanVar(value=False)).get():
+        problem_filter = getattr(self, "filter_only_problem", None)
+        if problem_filter is not None and problem_filter.get():
             cisla = [c for c in cisla if counts_open.get(str(c), 0) > 0]
 
         # filtr: podle kategorie (poslední otevřená)
@@ -1049,6 +1147,9 @@ class StrojeGrid(tk.Tk):
         return f"\n{val[:max_len] + '…' if len(val) > max_len else val}"
 
     def _apply_wartung_border(self, widget, stroj: dict):
+        if dm.is_archived_machine(stroj):
+            widget.config(highlightthickness=0)
+            return
         wartung_dni = days_to_next_wartung(stroj)
         if wartung_dni is None:
             widget.config(highlightthickness=0)
@@ -1068,10 +1169,15 @@ class StrojeGrid(tk.Tk):
         if dny is None:
             wart = ""
         elif dny <= 0:
-            wart = f"\n{T('Wartung', 'Wartung')}: ❗ {T('PROŠLÁ', 'ÜBERFÄLLIG')}"
+            wart = f"\n{T('Údržba', 'Wartung')}: ❗ {T('PROŠLÁ', 'ÜBERFÄLLIG')}"
         else:
-            wart = f"\n{T('Wartung', 'Wartung')}: {T('za', 'in')} {dny} {T('dní', 'Tagen')}"
+            wart = f"\n{T('Údržba', 'Wartung')}: {T('za', 'in')} {dny} {T('dní', 'Tagen')}"
 
+        archived = (
+            f"\n{T('Archivováno', 'Archiviert')}: {T('ano', 'ja')}"
+            if dm.is_archived_machine(stroj)
+            else ""
+        )
         return (
             f"{T('Stroj', 'Maschine')}: {cislo}\n"
             f"{T('Výrobce', 'Hersteller')}: {stroj.get('vyrobce', '')}\n"
@@ -1081,24 +1187,9 @@ class StrojeGrid(tk.Tk):
             f"{T('S/N', 'S/N')}: {stroj.get('seriove', '')}\n"
             f"{T('Stav', 'Status')}: {stav_ui(stroj.get('stav', ''))}\n"
             f"{T('Otevřené poruchy', 'Offene Störungen')}: {open_count}"
+            f"{archived}"
             f"{wart}"
         )
-
-    def _last_open_dt(self, cislo: str):
-        """Datetime poslední otevřené poruchy pro stroj (min pokud nic)."""
-        last_dt = datetime.min
-        for p in self.poruchy:
-            if str(p.get("cislo")) != str(cislo):
-                continue
-            if p.get("stav") != "otevrena":
-                continue
-            try:
-                dt = datetime.strptime(p.get("cas", ""), "%Y-%m-%d %H:%M")
-            except Exception:
-                dt = datetime.min
-            if dt > last_dt:
-                last_dt = dt
-        return last_dt
 
     def _apply_sort(self, cisla, counts_open, counts_30d, counts_all):
         """Vrátí seřazený list čísel strojů podle self.sort_mode."""
@@ -1119,7 +1210,7 @@ class StrojeGrid(tk.Tk):
 
         if mode == "last_open":
             # nejnovější otevřená porucha nahoře; stroje bez otevřené poruchy spadnou dolů
-            return sorted(cisla, key=lambda c: (self._last_open_dt(str(c)), c), reverse=True)
+            return sorted(cisla, key=lambda c: (last_open_dt(self.poruchy, str(c)), c), reverse=True)
 
         # fallback
         return sorted(cisla)
@@ -1151,14 +1242,21 @@ class StrojeGrid(tk.Tk):
                 self.tile_field.get() if hasattr(self, "tile_field") else "cislo_only")
             subtitle = self._build_tile_subtitle(s, choice)
             cnt_line = f"\n({open_count})" if open_count > 0 else ""
+            archived = dm.is_archived_machine(s)
+            archive_line = f"\n{T('ARCHIV', 'ARCHIV')}" if archived else ""
 
             tile = tk.Label(
                 self.grid_frame,
-                text=f"{cislo:02d}{subtitle}{cnt_line}",
+                text=f"{cislo:02d}{subtitle}{cnt_line}{archive_line}",
                 bd=1, relief="solid", width=12, height=4,
                 font=("Segoe UI", 20, "bold"), fg="#0b1b2b",
-                bg=barva_dlazdice(s.get("stav", "bezi"),
-                                  open_count, key, self.poruchy),
+                bg=(
+                    "#c9c9c9"
+                    if archived
+                    else barva_dlazdice(
+                        s.get("stav", "bezi"), open_count, key, self.poruchy
+                    )
+                ),
             )
 
             self._apply_wartung_border(tile, s)
@@ -1264,20 +1362,38 @@ class StrojeGrid(tk.Tk):
             label=f"{T('Otevřít detail', 'Detail öffnen')} {cislo}", command=lambda: self.otevri_detail(cislo))
         m.add_command(label=T("Složka souborů…", "Dateiordner…"),
                       command=lambda: otevrit_slozku(slozka_stroje(cislo)))
+        m.add_command(
+            label=T("Historie změn…", "Änderungsverlauf…"),
+            command=lambda: audit_ui.open_audit_history(self, cislo),
+        )
         m.add_separator()
         stroj = self.stroje.get(cislo, {
                                 "cislo": cislo, "typ": "", "vyrobce": "", "rok": "", "spm": "", "seriove": "", "stav": "bezi"})
+        if dm.is_archived_machine(stroj):
+            m.add_command(
+                label=T("Obnovit z archivu", "Aus Archiv wiederherstellen"),
+                command=lambda: self.obnovit_stroj_z_archivu(cislo),
+            )
+            try:
+                if event:
+                    m.tk_popup(event.x_root, event.y_root)
+            finally:
+                m.grab_release()
+            return
         m.add_command(label=UIT("➕", T("Nová porucha", "Neue Störung")),
                       command=lambda: self.nova_porucha(self, stroj))
         m.add_command(label=UIT("✅", T("Uzavřít poruchu (podle alarmu)", "Störung schl. (nach Alarm)")),
                       command=lambda: self.uzavrit_poruchu_podle_alarmu(self, cislo))
         m.add_command(label=UIT("✏️", T("Editovat otevřenou poruchu", "Offene Störung bearbeiten")),
                       command=lambda: self.editovat_otevrenou_poruchu(self, cislo))
+        m.add_command(label=T("Opravit uzavřenou poruchu…",
+                              "Geschlossene Störung korrigieren…"),
+                      command=lambda: self.korigovat_uzavrenou_poruchu(self, cislo))
         m.add_separator()
         m.add_command(label=UIT("✏️", T("Editovat stroj…", "Maschine bearbeiten…")),
                       command=lambda: self.editovat_stroj_gui(self, cislo))
-        m.add_command(label=UIT("🗑️", T("Smazat stroj…", "Maschine löschen…")),
-                      command=lambda: self.smazat_stroj_gui(cislo))
+        m.add_command(label=UIT("📦", T("Archivovat stroj…", "Maschine archivieren…")),
+                      command=lambda: self.archivovat_stroj_gui(cislo))
         try:
             if event:
                 m.tk_popup(event.x_root, event.y_root)
@@ -1286,7 +1402,7 @@ class StrojeGrid(tk.Tk):
 
 
 
-class StrojeGrid(StrojeGrid):  # rozšíření
+class StrojeGrid(StrojeGridBase):
     def otevri_detail(self, cislo: str):
         stroj = self.stroje.get(cislo)
         if not stroj:
@@ -1340,7 +1456,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
         tk.Button(
             actions,
-            text=UIT("✓", T("Wartung dnes", "Wartung heute")),
+            text=UIT("✓", T("Údržba dnes", "Wartung heute")),
             command=lambda: self.oznacit_wartung_dnes(win, cislo),
         ).pack(side="left", expand=True, fill="x", padx=6, pady=6)
 
@@ -1521,7 +1637,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
                 return
 
             detail = tk.Toplevel(dlg)
-            detail.title("Detail der Störung")
+            detail.title(T("Detail poruchy", "Detail der Störung"))
             detail.transient(dlg)
             detail.resizable(False, False)
 
@@ -1547,11 +1663,11 @@ class StrojeGrid(StrojeGrid):  # rozšíření
             frm_detail.grid_columnconfigure(1, weight=1)
 
             radky = [
-                ("Datum/Zeit", por.get("cas", "") or "-", None),
+                (T("Datum/čas", "Datum/Zeit"), por.get("cas", "") or "-", None),
                 ("Alarm", por.get("alarm", "") or "-", None),
-                ("Status", status_text, status_color),
-                ("Beschreibung", por.get("popis", "") or "-", None),
-                ("Lösung", por.get("reseni", "") or "-", None),
+                (T("Stav", "Status"), status_text, status_color),
+                (T("Popis", "Beschreibung"), por.get("popis", "") or "-", None),
+                (T("Řešení", "Lösung"), por.get("reseni", "") or "-", None),
             ]
 
             for idx, (label, value, color) in enumerate(radky):
@@ -1571,24 +1687,37 @@ class StrojeGrid(StrojeGrid):  # rozšíření
                 ).grid(row=idx, column=1, sticky="w", pady=5)
 
             detail_text = "\n".join([
-                f"Datum/Zeit: {por.get('cas', '') or '-'}",
+                f"{T('Datum/čas', 'Datum/Zeit')}: {por.get('cas', '') or '-'}",
                 f"Alarm: {por.get('alarm', '') or '-'}",
-                f"Status: {status_text}",
-                f"Beschreibung: {por.get('popis', '') or '-'}",
-                f"Lösung: {por.get('reseni', '') or '-'}",
+                f"{T('Stav', 'Status')}: {status_text}",
+                f"{T('Popis', 'Beschreibung')}: {por.get('popis', '') or '-'}",
+                f"{T('Řešení', 'Lösung')}: {por.get('reseni', '') or '-'}",
             ])
 
             def kopirovat():
                 detail.clipboard_clear()
                 detail.clipboard_append(detail_text)
                 detail.update()
-                messagebox.showinfo("Info", "In die Zwischenablage kopiert.", parent=detail)
+                messagebox.showinfo(
+                    T("Informace", "Info"),
+                    T(
+                        "Zkopírováno do schránky.",
+                        "In die Zwischenablage kopiert.",
+                    ),
+                    parent=detail,
+                )
 
             btns = tk.Frame(frm_detail)
             btns.grid(row=len(radky), column=0, columnspan=2, sticky="e", pady=(16, 0))
-            btn = tk.Button(btns, text="Schließen", command=detail.destroy)
+            btn = tk.Button(
+                btns, text=T("Zavřít", "Schließen"), command=detail.destroy
+            )
             btn.pack(side="right")
-            copy_btn = tk.Button(btns, text="In Zwischenablage kopieren", command=kopirovat)
+            copy_btn = tk.Button(
+                btns,
+                text=T("Kopírovat do schránky", "In Zwischenablage kopieren"),
+                command=kopirovat,
+            )
             copy_btn.pack(side="right", padx=(0, 8))
 
             detail.bind("<Escape>", lambda e: detail.destroy())
@@ -1675,6 +1804,18 @@ class StrojeGrid(StrojeGrid):  # rozšíření
         )
 
     def nova_porucha(self, parent, stroj):
+        if dm.is_archived_machine(stroj):
+            messagebox.showwarning(
+                T("Archivovaný stroj", "Archivierte Maschine"),
+                T(
+                    "K archivovanému stroji nelze přidat novou poruchu. "
+                    "Nejprve jej obnovte z archivu.",
+                    "Zu einer archivierten Maschine kann keine neue Störung "
+                    "hinzugefügt werden. Stellen Sie sie zuerst wieder her.",
+                ),
+                parent=parent,
+            )
+            return
         alarm = simpledialog.askstring(
             T("Nová porucha", "Neue Störung"), T("Alarm:", "Alarm:"), parent=parent)
         if not alarm:
@@ -1686,7 +1827,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
         def ask_beschreibung_dialog(parent_win):
             dlg = tk.Toplevel(parent_win)
-            dlg.title("Neue Störung")
+            dlg.title(T("Nová porucha", "Neue Störung"))
             dlg.transient(parent_win)
             dlg.grab_set()
             dlg.resizable(True, True)
@@ -1708,7 +1849,9 @@ class StrojeGrid(StrojeGrid):  # rozšíření
             frm.grid_columnconfigure(0, weight=1)
             frm.grid_rowconfigure(1, weight=1)
 
-            tk.Label(frm, text="Beschreibung:").grid(row=0, column=0, sticky="w", pady=(0, 6))
+            tk.Label(frm, text=T("Popis:", "Beschreibung:")).grid(
+                row=0, column=0, sticky="w", pady=(0, 6)
+            )
 
             text_frame = tk.Frame(frm)
             text_frame.grid(row=1, column=0, sticky="nsew")
@@ -1732,7 +1875,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
             btns = tk.Frame(frm)
             btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
-            tk.Button(btns, text="Abbrechen", command=zrusit).pack(side="right")
+            tk.Button(btns, text=T("Zrušit", "Abbrechen"), command=zrusit).pack(side="right")
             tk.Button(btns, text="OK", command=potvrdit, width=10).pack(side="right", padx=(0, 8))
 
             dlg.bind("<Escape>", lambda e: zrusit())
@@ -1749,7 +1892,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
         por = nacti_poruchy()
         pid = nove_id(por)
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        por.append({
+        new_fault = {
             "id": pid,
             "cas": now,
             "cas_uzavreni": "",
@@ -1760,9 +1903,17 @@ class StrojeGrid(StrojeGrid):  # rozšíření
             "popis": popis,
             "reseni": "",
             "stav": "otevrena"
-        })
+        }
+        por.append(new_fault)
         uloz_poruchy(por)
         self.poruchy = por
+        self._audit_event(
+            "fault_created",
+            "fault",
+            entity_id=pid,
+            machine_number=stroj["cislo"],
+            details={"fields": audit.changed_fields({}, new_fault)},
+        )
         messagebox.showinfo(
             "OK", T("Porucha přidána.", "Störung hinzugefügt."), parent=parent)
 
@@ -1814,7 +1965,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
         btns = tk.Frame(frm)
         btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
-        tk.Button(btns, text="Abbrechen", command=zrusit).pack(side="right")
+        tk.Button(btns, text=T("Zrušit", "Abbrechen"), command=zrusit).pack(side="right")
         tk.Button(btns, text="OK", command=potvrdit, width=10).pack(side="right", padx=(0, 8))
 
         dlg.bind("<Escape>", lambda e: zrusit())
@@ -1847,15 +1998,25 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
         from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        before = dict(target)
+        updated = target
         for p in por:
             if p.get("id") == target.get("id"):
                 p["reseni"] = reseni
                 p["stav"] = "uzavrena"
                 p["cas_uzavreni"] = now
+                updated = p
                 break
 
         uloz_poruchy(por)
         self.poruchy = por
+        self._audit_event(
+            "fault_closed",
+            "fault",
+            entity_id=target.get("id", ""),
+            machine_number=cislo,
+            details={"fields": audit.changed_fields(before, updated)},
+        )
         self.nakresli_mrizku()
         messagebox.showinfo("OK", T("Porucha uzavřena.",
                             "Störung geschlossen."), parent=parent)
@@ -1903,17 +2064,26 @@ class StrojeGrid(StrojeGrid):  # rozšíření
         self.operator = op.strip()
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
-
+        before = dict(target)
+        updated = target
         for p in por:
             if p.get("id") == target.get("id"):
                 p["reseni"] = reseni
                 p["stav"] = "uzavrena"
                 p["cas_uzavreni"] = now
                 p["operator_uzavrel"] = self.operator
+                updated = p
                 break
 
         uloz_poruchy(por)
         self.poruchy = por
+        self._audit_event(
+            "fault_closed",
+            "fault",
+            entity_id=target.get("id", ""),
+            machine_number=cislo,
+            details={"fields": audit.changed_fields(before, updated)},
+        )
         self.nakresli_mrizku()
         messagebox.showinfo("OK", T("Porucha uzavřena.",
                             "Störung geschlossen."), parent=parent)
@@ -1921,8 +2091,21 @@ class StrojeGrid(StrojeGrid):  # rozšíření
         open_left = any(p.get("cislo") == cislo and p.get(
             "stav") == "otevrena" for p in por)
         if not open_left and self.stroje.get(cislo, {}).get("stav") != "bezi":
+            before_machine = dict(self.stroje[cislo])
             self.stroje[cislo]["stav"] = "bezi"
             uloz_stroje(self.stroje)
+            self._audit_event(
+                "machine_status_changed",
+                "machine",
+                entity_id=cislo,
+                machine_number=cislo,
+                details={
+                    "fields": audit.changed_fields(
+                        before_machine, self.stroje[cislo]
+                    ),
+                    "reason": "all_faults_closed",
+                },
+            )
 
     def editovat_stroj_gui(self, parent, cislo):
         stroj = self.stroje.get(cislo)
@@ -1930,6 +2113,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
             messagebox.showwarning(
                 T("Editovat stroj", "Maschine bearbeiten"), f"{T('Stroj', 'Maschine')} {cislo} {T('nenalezen', 'nicht gefunden')}.", parent=parent)
             return
+        before = dict(stroj)
 
         vyrobce = simpledialog.askstring(
             T("Editovat stroj", "Maschine bearbeiten"), T("Výrobce:", "Hersteller:"), initialvalue=stroj.get("vyrobce", ""), parent=parent)
@@ -2027,6 +2211,13 @@ class StrojeGrid(StrojeGrid):  # rozšíření
             "stav": stav
         })
         uloz_stroje(self.stroje)
+        self._audit_event(
+            "machine_updated",
+            "machine",
+            entity_id=cislo,
+            machine_number=cislo,
+            details={"fields": audit.changed_fields(before, stroj)},
+        )
         self.nakresli_mrizku()
         messagebox.showinfo(
             T("Uloženo", "Gespeichert"), f"{T('Stroj', 'Maschine')} {cislo} {T('upraven', 'bearbeitet')}.", parent=parent)
@@ -2042,26 +2233,44 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
         if not stroj:
             messagebox.showerror(
-                T("Wartung", "Wartung"),
+                T("Údržba", "Wartung"),
                 f"{T('Stroj', 'Maschine')} {cislo} {T('nebyl nalezen', 'nicht gefunden')}.",
                 parent=parent,
             )
             return
 
+        if dm.is_archived_machine(stroj):
+            messagebox.showwarning(
+                T("Archivovaný stroj", "Archivierte Maschine"),
+                T(
+                    "U archivovaného stroje nelze zaznamenat údržbu.",
+                    "Für eine archivierte Maschine kann keine Wartung erfasst werden.",
+                ),
+                parent=parent,
+            )
+            return
+        before = dict(stroj)
         stroj["wartung_last"] = today
         if not stroj.get("wartung_interval"):
             stroj["wartung_interval"] = "180"
 
         # uložíme zpět
         uloz_stroje(stroje_dict)
+        self._audit_event(
+            "maintenance_recorded",
+            "machine",
+            entity_id=cislo,
+            machine_number=cislo,
+            details={"fields": audit.changed_fields(before, stroj)},
+        )
 
         # aktualizujeme self.stroje a překreslíme mřížku
         self.stroje = stroje_dict
         self.nakresli_mrizku()
 
         messagebox.showinfo(
-            T("Wartung", "Wartung"),
-            f"{T('Na stroji', 'An Maschine')} {cislo} {T('byla zaznamenána Wartung', 'wurde Wartung erfasst')} ({today}).",
+            T("Údržba", "Wartung"),
+            f"{T('Na stroji', 'An Maschine')} {cislo} {T('byla zaznamenána údržba', 'wurde Wartung erfasst')} ({today}).",
             parent=parent,
         )
 
@@ -2102,7 +2311,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
             self._show_porucha_detail_dialog(win, por_detail)
 
         win = tk.Toplevel(parent)
-        win.title("Störungshistorie")
+        win.title(T("Historie poruch", "Störungshistorie"))
         win.transient(parent)
         win.grab_set()
         win.resizable(True, True)
@@ -2113,7 +2322,10 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
         tk.Label(
             frm,
-            text="Alle Einträge für diese Maschine. Neueste zuerst.",
+            text=T(
+                "Všechny záznamy tohoto stroje. Nejnovější jsou první.",
+                "Alle Einträge für diese Maschine. Neueste zuerst.",
+            ),
             font=("Segoe UI", 10, "bold"),
         ).grid(row=0, column=0, sticky="w", pady=(0, 10))
 
@@ -2122,10 +2334,10 @@ class StrojeGrid(StrojeGrid):  # rozšíření
         tree_frame.grid(row=1, column=0, sticky="nsew")
 
         tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=14)
-        tree.heading("cas", text="Datum/Zeit")
+        tree.heading("cas", text=T("Datum/čas", "Datum/Zeit"))
         tree.heading("alarm", text="Alarm")
-        tree.heading("stav", text="Status")
-        tree.heading("text", text="Text")
+        tree.heading("stav", text=T("Stav", "Status"))
+        tree.heading("text", text=T("Text", "Text"))
         tree.column("cas", width=160, anchor="w", stretch=False)
         tree.column("alarm", width=130, anchor="w", stretch=False)
         tree.column("stav", width=110, anchor="w", stretch=False)
@@ -2175,7 +2387,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
         btns = tk.Frame(frm)
         btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
-        btn = tk.Button(btns, text="Schließen", command=win.destroy)
+        btn = tk.Button(btns, text=T("Zavřít", "Schließen"), command=win.destroy)
         btn.pack(side="right")
 
         win.bind("<Escape>", lambda e: win.destroy())
@@ -2193,6 +2405,9 @@ class StrojeGrid(StrojeGrid):  # rozšíření
         self.poruchy = nacti_poruchy()
         self.sablony = nacti_sablony()
         self.nakresli_mrizku()
+
+    def kontrola_dat_gui(self):
+        return validation_ui.open_data_validation_dialog(self)
 
     # === Globální hledání poruch + export CSV ===
     def global_search_gui(self):
@@ -2411,7 +2626,14 @@ class StrojeGrid(StrojeGrid):  # rozšíření
                 detail.clipboard_clear()
                 detail.clipboard_append(detail_text)
                 detail.update()
-                messagebox.showinfo("Info", "In die Zwischenablage kopiert.", parent=detail)
+                messagebox.showinfo(
+                    T("Informace", "Info"),
+                    T(
+                        "Zkopírováno do schránky.",
+                        "In die Zwischenablage kopiert.",
+                    ),
+                    parent=detail,
+                )
 
             def copy_selection(event=None):
                 try:
@@ -2430,8 +2652,8 @@ class StrojeGrid(StrojeGrid):  # rozšíření
                 return "break"
 
             ctx = tk.Menu(detail, tearoff=False)
-            ctx.add_command(label="Kopieren", command=copy_selection)
-            ctx.add_command(label="Alles markieren", command=select_all)
+            ctx.add_command(label=T("Kopírovat", "Kopieren"), command=copy_selection)
+            ctx.add_command(label=T("Vybrat vše", "Alles markieren"), command=select_all)
 
             def show_context(event):
                 try:
@@ -2446,8 +2668,14 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
             btns = tk.Frame(frm_detail)
             btns.grid(row=1, column=0, columnspan=2, sticky="e", pady=(12, 0))
-            tk.Button(btns, text="Schließen", command=detail.destroy).pack(side="right")
-            tk.Button(btns, text="In Zwischenablage kopieren", command=copy_all).pack(side="right", padx=(0, 8))
+            tk.Button(
+                btns, text=T("Zavřít", "Schließen"), command=detail.destroy
+            ).pack(side="right")
+            tk.Button(
+                btns,
+                text=T("Kopírovat do schránky", "In Zwischenablage kopieren"),
+                command=copy_all,
+            ).pack(side="right", padx=(0, 8))
 
             detail.bind("<Escape>", lambda e: detail.destroy())
             detail.after(0, text_widget.focus_set)
@@ -2500,8 +2728,8 @@ class StrojeGrid(StrojeGrid):  # rozšíření
     def _porucha_foto_hinzufuegen(self, parent, porucha: dict, on_change=None):
         src = filedialog.askopenfilename(
             parent=parent,
-            title="Foto hinzufügen",
-            filetypes=[("Bilder", "*.jpg *.jpeg *.png *.bmp *.webp")],
+            title=T("Přidat fotografii", "Foto hinzufügen"),
+            filetypes=[(T("Obrázky", "Bilder"), "*.jpg *.jpeg *.png *.bmp *.webp")],
         )
         if not src:
             return
@@ -2529,18 +2757,33 @@ class StrojeGrid(StrojeGrid):  # rozšíření
             messagebox.showerror(T("Chyba", "Fehler"), f"{e}", parent=parent)
             return
 
+        self._audit_event(
+            "photo_added",
+            "fault",
+            entity_id=porucha.get("id", ""),
+            machine_number=porucha.get("cislo", ""),
+            details={"file": dest_name},
+        )
         if on_change:
             on_change()
-        messagebox.showinfo(T("Foto", "Foto"), "Foto gespeichert.", parent=parent)
+        messagebox.showinfo(
+            T("Fotografie", "Foto"),
+            T("Fotografie byla uložena.", "Foto gespeichert."),
+            parent=parent,
+        )
 
     def _porucha_fotos_oeffnen(self, parent, porucha: dict, on_change=None):
         photos = self._porucha_foto_paths(porucha)
         if not photos:
-            messagebox.showinfo(T("Foto", "Foto"), "Keine Fotos vorhanden.", parent=parent)
+            messagebox.showinfo(
+                T("Fotografie", "Foto"),
+                T("Nejsou k dispozici žádné fotografie.", "Keine Fotos vorhanden."),
+                parent=parent,
+            )
             return
 
         win = tk.Toplevel(parent)
-        win.title("Fotos öffnen")
+        win.title(T("Otevřít fotografie", "Fotos öffnen"))
         win.transient(parent)
         win.grab_set()
         win.resizable(True, True)
@@ -2573,8 +2816,8 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
         btns = tk.Frame(frm)
         btns.grid(row=1, column=0, columnspan=2, sticky="e", pady=(12, 0))
-        tk.Button(btns, text="Schließen", command=win.destroy).pack(side="right")
-        tk.Button(btns, text="Öffnen", command=otevrit).pack(side="right", padx=(0, 8))
+        tk.Button(btns, text=T("Zavřít", "Schließen"), command=win.destroy).pack(side="right")
+        tk.Button(btns, text=T("Otevřít", "Öffnen"), command=otevrit).pack(side="right", padx=(0, 8))
 
         listbox.bind("<Double-1>", lambda e: otevrit())
         win.bind("<Escape>", lambda e: win.destroy())
@@ -2584,13 +2827,17 @@ class StrojeGrid(StrojeGrid):  # rozšíření
     def _porucha_ordner_oeffnen(self, parent, porucha: dict):
         folder = self._porucha_foto_slozka(porucha)
         if not folder.is_dir():
-            messagebox.showinfo(T("Ordner", "Ordner"), "Kein Ordner vorhanden.", parent=parent)
+            messagebox.showinfo(
+                T("Složka", "Ordner"),
+                T("Složka neexistuje.", "Kein Ordner vorhanden."),
+                parent=parent,
+            )
             return
         otevrit_slozku(folder)
 
     def _show_porucha_detail_dialog(self, parent, porucha: dict):
         detail = tk.Toplevel(parent)
-        detail.title("Detail der Störung")
+        detail.title(T("Detail poruchy", "Detail der Störung"))
         detail.transient(parent)
         detail.resizable(False, False)
 
@@ -2621,11 +2868,11 @@ class StrojeGrid(StrojeGrid):  # rozšíření
             foto_var.set(f"Fotos: {len(self._porucha_foto_paths(porucha))}")
 
         radky = [
-            ("Datum/Zeit", porucha.get("cas", "") or "-", None),
+            (T("Datum/čas", "Datum/Zeit"), porucha.get("cas", "") or "-", None),
             ("Alarm", porucha.get("alarm", "") or "-", None),
-            ("Status", status_text, status_color),
-            ("Beschreibung", porucha.get("popis", "") or "-", None),
-            ("Lösung", porucha.get("reseni", "") or "-", None),
+            (T("Stav", "Status"), status_text, status_color),
+            (T("Popis", "Beschreibung"), porucha.get("popis", "") or "-", None),
+            (T("Řešení", "Lösung"), porucha.get("reseni", "") or "-", None),
         ]
 
         for idx, (label, value, color) in enumerate(radky):
@@ -2649,42 +2896,52 @@ class StrojeGrid(StrojeGrid):  # rozšíření
         )
 
         detail_text = "\n".join([
-            f"Datum/Zeit: {porucha.get('cas', '') or '-'}",
+            f"{T('Datum/čas', 'Datum/Zeit')}: {porucha.get('cas', '') or '-'}",
             f"Alarm: {porucha.get('alarm', '') or '-'}",
-            f"Status: {status_text}",
-            f"Beschreibung: {porucha.get('popis', '') or '-'}",
-            f"Lösung: {porucha.get('reseni', '') or '-'}",
+            f"{T('Stav', 'Status')}: {status_text}",
+            f"{T('Popis', 'Beschreibung')}: {porucha.get('popis', '') or '-'}",
+            f"{T('Řešení', 'Lösung')}: {porucha.get('reseni', '') or '-'}",
         ])
 
         def kopirovat():
             detail.clipboard_clear()
             detail.clipboard_append(detail_text)
             detail.update()
-            messagebox.showinfo("Info", "In die Zwischenablage kopiert.", parent=detail)
+            messagebox.showinfo(
+                T("Informace", "Info"),
+                T("Zkopírováno do schránky.", "In die Zwischenablage kopiert."),
+                parent=detail,
+            )
 
         photo_btns = tk.Frame(frm_detail)
         photo_btns.grid(row=len(radky) + 1, column=0, columnspan=2, sticky="e", pady=(12, 0))
         tk.Button(
             photo_btns,
-            text="Ordner öffnen",
+            text=T("Otevřít složku", "Ordner öffnen"),
             command=lambda: self._porucha_ordner_oeffnen(detail, porucha),
         ).pack(side="right")
         tk.Button(
             photo_btns,
-            text="Fotos öffnen",
+            text=T("Otevřít fotografie", "Fotos öffnen"),
             command=lambda: self._porucha_fotos_oeffnen(detail, porucha, on_change=refresh_photo_count),
         ).pack(side="right", padx=(0, 8))
         tk.Button(
             photo_btns,
-            text="Foto hinzufügen",
+            text=T("Přidat fotografii", "Foto hinzufügen"),
             command=lambda: self._porucha_foto_hinzufuegen(detail, porucha, on_change=refresh_photo_count),
         ).pack(side="right", padx=(0, 8))
 
         btns = tk.Frame(frm_detail)
         btns.grid(row=len(radky) + 2, column=0, columnspan=2, sticky="e", pady=(16, 0))
-        btn = tk.Button(btns, text="Schließen", command=detail.destroy)
+        btn = tk.Button(
+            btns, text=T("Zavřít", "Schließen"), command=detail.destroy
+        )
         btn.pack(side="right")
-        copy_btn = tk.Button(btns, text="In Zwischenablage kopieren", command=kopirovat)
+        copy_btn = tk.Button(
+            btns,
+            text=T("Kopírovat do schránky", "In Zwischenablage kopieren"),
+            command=kopirovat,
+        )
         copy_btn.pack(side="right", padx=(0, 8))
 
         refresh_photo_count()
@@ -2816,7 +3073,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
         plt.show()
 
-    # === Smazání stroje (+ volitelné smazání poruch) ===
+    # === Hromadné uzavření a bezpečná archivace strojů ===
     def hromadne_uzavrit(self, parent):
         ids = bulk_uzavrit_dialog(parent, self.poruchy)
         if ids is None:
@@ -2826,35 +3083,92 @@ class StrojeGrid(StrojeGrid):  # rozšíření
                                 T("Nic nebylo vybráno.", "Nichts ausgewählt."), parent=parent)
             return
         n = 0
+        closed_ids = []
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         for p in self.poruchy:
             if p.get("id") in ids and p.get("stav") == "otevrena":
                 p["stav"] = "uzavrena"
                 p["cas_uzavreni"] = now
+                closed_ids.append(str(p.get("id", "")))
                 n += 1
         uloz_poruchy(self.poruchy)
+        if closed_ids:
+            self._audit_event(
+                "faults_bulk_closed",
+                "fault",
+                details={"fault_ids": closed_ids, "closed_at": now},
+            )
         self.nakresli_mrizku()
         messagebox.showinfo(
             T("Hotovo", "Fertig"), f"{T('Uzavřeno', 'Geschlossen')} {n} {T('záznamů', 'Einträge')}.", parent=parent)
 
-    def smazat_stroj_gui(self, cislo: str):
+    def archivovat_stroj_gui(self, cislo: str):
         if cislo not in self.stroje:
-            messagebox.showwarning(T("Smazat stroj", "Maschine löschen"),
+            messagebox.showwarning(T("Archivovat stroj", "Maschine archivieren"),
                                    f"{T('Stroj', 'Maschine')} {cislo} {T('nenalezen', 'nicht gefunden')}.", parent=self)
             return
-        if messagebox.askyesno(T("Smazat stroj", "Maschine löschen"), f"{T('Opravdu smazat stroj', 'Maschine wirklich löschen')} {cislo}?", parent=self):
-            del_por = messagebox.askyesno(T("Poruchy", "Störungen"), T(
-                "Smazat i všechny poruchy tohoto stroje?", "Auch alle Störungen dieser Maschine löschen?"), parent=self)
-            self.stroje.pop(cislo, None)
-            uloz_stroje(self.stroje)
-            if del_por:
-                por = nacti_poruchy()
-                por = [p for p in por if p.get("cislo") != cislo]
-                uloz_poruchy(por)
-                self.poruchy = por
-            self.nakresli_mrizku()
-            messagebox.showinfo(T("Hotovo", "Fertig"), T(
-                "Stroj byl smazán.", "Maschine wurde gelöscht."), parent=self)
+        stroj = self.stroje[cislo]
+        if dm.is_archived_machine(stroj):
+            return
+        if not messagebox.askyesno(
+            T("Archivovat stroj", "Maschine archivieren"),
+            T(
+                f"Archivovat stroj {cislo}?\n\n"
+                "Poruchy, fotografie a dokumenty zůstanou zachované. "
+                "Stroj lze kdykoli obnovit.",
+                f"Maschine {cislo} archivieren?\n\n"
+                "Störungen, Fotos und Dokumente bleiben erhalten. "
+                "Die Maschine kann jederzeit wiederhergestellt werden.",
+            ),
+            parent=self,
+        ):
+            return
+        before = dict(stroj)
+        stroj["archivovan"] = "1"
+        uloz_stroje(self.stroje)
+        self._audit_event(
+            "machine_archived",
+            "machine",
+            entity_id=cislo,
+            machine_number=cislo,
+            details={"fields": audit.changed_fields(before, stroj)},
+        )
+        if self.last_selected == cislo:
+            self.last_selected = None
+        self.nakresli_mrizku()
+        messagebox.showinfo(
+            T("Hotovo", "Fertig"),
+            T(
+                "Stroj byl archivován; jeho historie a soubory byly zachovány.",
+                "Maschine wurde archiviert; Verlauf und Dateien bleiben erhalten.",
+            ),
+            parent=self,
+        )
+
+    def obnovit_stroj_z_archivu(self, cislo: str):
+        stroj = self.stroje.get(cislo)
+        if not stroj or not dm.is_archived_machine(stroj):
+            return
+        before = dict(stroj)
+        stroj["archivovan"] = "0"
+        uloz_stroje(self.stroje)
+        self._audit_event(
+            "machine_restored",
+            "machine",
+            entity_id=cislo,
+            machine_number=cislo,
+            details={"fields": audit.changed_fields(before, stroj)},
+        )
+        self.nakresli_mrizku()
+        messagebox.showinfo(
+            T("Hotovo", "Fertig"),
+            T("Stroj byl obnoven z archivu.", "Maschine wurde aus dem Archiv wiederhergestellt."),
+            parent=self,
+        )
+
+    def smazat_stroj_gui(self, cislo: str):
+        """Zpětně kompatibilní název; stroje se již fyzicky nemažou."""
+        return self.archivovat_stroj_gui(cislo)
 
     def editovat_otevrenou_poruchu(self, parent, cislo: str):
         por = nacti_poruchy()
@@ -2879,7 +3193,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
                 return text[: max_len - 3].rstrip() + "..."
 
             dlg = tk.Toplevel(parent_win)
-            dlg.title("Offene Störung auswählen")
+            dlg.title(T("Vybrat otevřenou poruchu", "Offene Störung auswählen"))
             dlg.transient(parent_win)
             dlg.grab_set()
             dlg.resizable(True, True)
@@ -2892,7 +3206,10 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
             tk.Label(
                 frm,
-                text="Bitte eine offene Störung zur Bearbeitung auswählen.",
+                text=T(
+                    "Vyberte otevřenou poruchu k úpravě.",
+                    "Bitte eine offene Störung zur Bearbeitung auswählen.",
+                ),
                 font=("Segoe UI", 10, "bold"),
             ).grid(row=0, column=0, sticky="w", pady=(0, 10))
 
@@ -2904,10 +3221,10 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
             tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=10)
             tree.heading("id", text="ID")
-            tree.heading("cas", text="Datum/Zeit")
-            tree.heading("kategorie", text="Kategorie")
+            tree.heading("cas", text=T("Datum/čas", "Datum/Zeit"))
+            tree.heading("kategorie", text=T("Kategorie", "Kategorie"))
             tree.heading("alarm", text="Alarm")
-            tree.heading("popis", text="Beschreibung")
+            tree.heading("popis", text=T("Popis", "Beschreibung"))
             tree.column("id", width=60, anchor="center", stretch=False)
             tree.column("cas", width=150, anchor="w", stretch=False)
             tree.column("kategorie", width=120, anchor="w", stretch=False)
@@ -2950,7 +3267,11 @@ class StrojeGrid(StrojeGrid):  # rozšíření
             def potvrdit():
                 selection = tree.selection()
                 if not selection:
-                    messagebox.showwarning("Warnung", "Bitte eine Störung auswählen.", parent=dlg)
+                    messagebox.showwarning(
+                        T("Upozornění", "Warnung"),
+                        T("Vyberte poruchu.", "Bitte eine Störung auswählen."),
+                        parent=dlg,
+                    )
                     return
                 result["value"] = by_id.get(selection[0])
                 dlg.destroy()
@@ -2967,8 +3288,12 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
             btns = tk.Frame(frm)
             btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
-            ttk.Button(btns, text="Abbrechen", width=12, command=zrusit).pack(side="right")
-            ttk.Button(btns, text="Bearbeiten", width=12, command=potvrdit).pack(side="right", padx=(0, 8))
+            ttk.Button(
+                btns, text=T("Zrušit", "Abbrechen"), width=12, command=zrusit
+            ).pack(side="right")
+            ttk.Button(
+                btns, text=T("Upravit", "Bearbeiten"), width=12, command=potvrdit
+            ).pack(side="right", padx=(0, 8))
 
             tree.bind("<Double-1>", double_click)
             dlg.bind("<Return>", lambda e: potvrdit())
@@ -2981,6 +3306,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
         target = vyber_pro_editaci(parent, opened)
         if target is None:
             return
+        before = dict(target)
 
         new_alarm = simpledialog.askstring(T("Editace", "Bearbeiten"), T(
             "Alarm:", "Alarm:"), initialvalue=target.get("alarm", ""), parent=parent)
@@ -2992,7 +3318,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
         def ask_beschreibung_dialog(parent_win, initial_text=""):
             dlg = tk.Toplevel(parent_win)
-            dlg.title("Offene Störung bearbeiten")
+            dlg.title(T("Upravit otevřenou poruchu", "Offene Störung bearbeiten"))
             dlg.transient(parent_win)
             dlg.grab_set()
             dlg.resizable(True, True)
@@ -3014,7 +3340,9 @@ class StrojeGrid(StrojeGrid):  # rozšíření
             frm.grid_columnconfigure(0, weight=1)
             frm.grid_rowconfigure(1, weight=1)
 
-            tk.Label(frm, text="Beschreibung:").grid(row=0, column=0, sticky="w", pady=(0, 6))
+            tk.Label(frm, text=T("Popis:", "Beschreibung:")).grid(
+                row=0, column=0, sticky="w", pady=(0, 6)
+            )
 
             text_frame = tk.Frame(frm)
             text_frame.grid(row=1, column=0, sticky="nsew")
@@ -3040,7 +3368,7 @@ class StrojeGrid(StrojeGrid):  # rozšíření
 
             btns = tk.Frame(frm)
             btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
-            tk.Button(btns, text="Abbrechen", command=zrusit).pack(side="right")
+            tk.Button(btns, text=T("Zrušit", "Abbrechen"), command=zrusit).pack(side="right")
             tk.Button(btns, text="OK", command=potvrdit, width=10).pack(side="right", padx=(0, 8))
 
             dlg.bind("<Escape>", lambda e: zrusit())
@@ -3062,8 +3390,429 @@ class StrojeGrid(StrojeGrid):  # rozšíření
                 break
         uloz_poruchy(por)
         self.poruchy = por
+        self._audit_event(
+            "fault_updated",
+            "fault",
+            entity_id=target.get("id", ""),
+            machine_number=cislo,
+            details={"fields": audit.changed_fields(before, target)},
+        )
         messagebox.showinfo(T("Uloženo", "Gespeichert"),
                             f"{T('Porucha', 'Störung')} ID {target.get('id')} {T('upravena', 'bearbeitet')}.", parent=parent)
+
+    def korigovat_uzavrenou_poruchu(self, parent, cislo: str):
+        def ask_continue():
+            dlg = tk.Toplevel(parent)
+            dlg.title(T("Upozornění", "Achtung"))
+            dlg.transient(parent)
+            dlg.grab_set()
+            dlg.resizable(False, False)
+
+            frm = tk.Frame(dlg, padx=16, pady=14)
+            frm.pack(fill="both", expand=True)
+            tk.Label(
+                frm,
+                text=T(
+                    "Upravujete již uzavřenou poruchu.\n"
+                    "Opravujte pouze chyby nebo neúplné záznamy.",
+                    "Sie bearbeiten eine bereits geschlossene Störung.\n"
+                    "Bitte nur Fehler oder unvollständige Einträge korrigieren.",
+                ),
+                justify="left",
+                wraplength=460,
+            ).pack(anchor="w", pady=(0, 14))
+
+            result = {"ok": False}
+
+            def weiter():
+                result["ok"] = True
+                dlg.destroy()
+
+            def abbrechen():
+                dlg.destroy()
+
+            btns = tk.Frame(frm)
+            btns.pack(anchor="e")
+            ttk.Button(btns, text=T("Zrušit", "Abbrechen"), width=12, command=abbrechen).pack(side="right")
+            ttk.Button(btns, text=T("Pokračovat", "Weiter"), width=12, command=weiter).pack(side="right", padx=(0, 8))
+
+            dlg.bind("<Return>", lambda e: weiter())
+            dlg.bind("<Escape>", lambda e: abbrechen())
+            dlg.protocol("WM_DELETE_WINDOW", abbrechen)
+            center_over(dlg, parent)
+            parent.wait_window(dlg)
+            return result["ok"]
+
+        if not ask_continue():
+            return
+
+        por = nacti_poruchy()
+        closed = [
+            p for p in por
+            if p.get("cislo") == str(cislo)
+            and str(p.get("stav", "")).strip().lower() in ("uzavrena", "geschlossen", "g")
+        ]
+        if not closed:
+            messagebox.showinfo(
+                T("Vybrat uzavřenou poruchu", "Geschlossene Störung auswählen"),
+                T(
+                    "Tento stroj nemá žádnou uzavřenou poruchu.",
+                    "Keine geschlossene Störung an dieser Maschine.",
+                ),
+                parent=parent,
+            )
+            return
+        def vyber_uzavrenou(parent_win, closed_items):
+            def _dt_key(p):
+                for field in ("cas_uzavreni", "cas"):
+                    value = (p.get(field) or "").strip()
+                    if not value:
+                        continue
+                    try:
+                        return datetime.strptime(value, "%Y-%m-%d %H:%M")
+                    except Exception:
+                        pass
+                return datetime.min
+
+            def _zkrat(text, max_len=70):
+                text = (text or "").strip()
+                if len(text) <= max_len:
+                    return text or "-"
+                return text[: max_len - 3].rstrip() + "..."
+
+            closed_sorted = sorted(
+                closed_items,
+                key=lambda p: (_dt_key(p), str(p.get("id") or "")),
+                reverse=True,
+            )
+            by_id = {str(p.get("id", "")).strip(): p for p in closed_sorted if str(p.get("id", "")).strip()}
+
+            dlg = tk.Toplevel(parent_win)
+            dlg.title(T("Vybrat uzavřenou poruchu", "Geschlossene Störung auswählen"))
+            dlg.transient(parent_win)
+            dlg.grab_set()
+            dlg.resizable(True, True)
+            dlg.geometry("1180x420")
+
+            frm = tk.Frame(dlg, padx=12, pady=12)
+            frm.pack(fill="both", expand=True)
+            frm.grid_columnconfigure(0, weight=1)
+            frm.grid_rowconfigure(1, weight=1)
+
+            tk.Label(
+                frm,
+                text=T(
+                    "Vyberte uzavřenou poruchu k opravě.",
+                    "Bitte eine geschlossene Störung zur Korrektur auswählen.",
+                ),
+                font=("Segoe UI", 10, "bold"),
+            ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+
+            cols = ("id", "cas", "alarm", "kategorie", "popis", "reseni", "cas_uzavreni")
+            tree_frame = tk.Frame(frm)
+            tree_frame.grid(row=1, column=0, sticky="nsew")
+            tree_frame.grid_rowconfigure(0, weight=1)
+            tree_frame.grid_columnconfigure(0, weight=1)
+
+            tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=12)
+            headings = {
+                "id": "ID",
+                "cas": T("Datum/čas", "Datum/Zeit"),
+                "alarm": "Alarm",
+                "kategorie": T("Kategorie", "Kategorie"),
+                "popis": T("Popis", "Beschreibung"),
+                "reseni": T("Řešení", "Lösung"),
+                "cas_uzavreni": T("Uzavřeno", "Geschlossen am"),
+            }
+            widths = {
+                "id": 60,
+                "cas": 145,
+                "alarm": 120,
+                "kategorie": 115,
+                "popis": 280,
+                "reseni": 280,
+                "cas_uzavreni": 145,
+            }
+            for col in cols:
+                tree.heading(col, text=headings[col])
+                tree.column(col, width=widths[col], anchor=("center" if col == "id" else "w"), stretch=col in ("popis", "reseni"))
+
+            yscroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+            xscroll = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+            tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+            tree.grid(row=0, column=0, sticky="nsew")
+            yscroll.grid(row=0, column=1, sticky="ns")
+            xscroll.grid(row=1, column=0, sticky="ew")
+
+            for p in closed_sorted:
+                iid = str(p.get("id", "")).strip()
+                if not iid:
+                    continue
+                tree.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=(
+                        iid,
+                        p.get("cas", "") or "",
+                        p.get("alarm", "") or "",
+                        kat_ui(p.get("kategorie", "") or ""),
+                        _zkrat(p.get("popis", "") or ""),
+                        _zkrat(p.get("reseni", "") or ""),
+                        p.get("cas_uzavreni", "") or "",
+                    ),
+                )
+
+            if closed_sorted:
+                first_id = str(closed_sorted[0].get("id", "")).strip()
+                if first_id:
+                    tree.selection_set(first_id)
+                    tree.focus(first_id)
+
+            result = {"value": None}
+
+            def korrigieren():
+                selection = tree.selection()
+                if not selection:
+                    messagebox.showwarning(
+                        T("Upozornění", "Warnung"),
+                        T("Vyberte poruchu.", "Bitte eine Störung auswählen."),
+                        parent=dlg,
+                    )
+                    return
+                result["value"] = by_id.get(selection[0])
+                dlg.destroy()
+
+            def abbrechen():
+                dlg.destroy()
+
+            def double_click(event):
+                iid = tree.identify_row(event.y)
+                if iid:
+                    tree.selection_set(iid)
+                    tree.focus(iid)
+                korrigieren()
+
+            btns = tk.Frame(frm)
+            btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
+            ttk.Button(
+                btns, text=T("Zrušit", "Abbrechen"), width=12, command=abbrechen
+            ).pack(side="right")
+            ttk.Button(
+                btns, text=T("Opravit", "Korrigieren"), width=12, command=korrigieren
+            ).pack(side="right", padx=(0, 8))
+
+            tree.bind("<Double-1>", double_click)
+            dlg.bind("<Return>", lambda e: korrigieren())
+            dlg.bind("<Escape>", lambda e: abbrechen())
+            dlg.protocol("WM_DELETE_WINDOW", abbrechen)
+            dlg.after(0, tree.focus_set)
+            center_over(dlg, parent_win)
+            parent_win.wait_window(dlg)
+            return result["value"]
+
+        target = vyber_uzavrenou(parent, closed)
+        if target is None:
+            return
+        before = dict(target)
+
+        def edit_dialog(parent_win, porucha):
+            dlg = tk.Toplevel(parent_win)
+            dlg.title(T("Opravit uzavřenou poruchu", "Geschlossene Störung korrigieren"))
+            dlg.transient(parent_win)
+            dlg.grab_set()
+            dlg.resizable(True, True)
+            dlg.geometry("820x620")
+
+            frm = tk.Frame(dlg, padx=12, pady=12)
+            frm.pack(fill="both", expand=True)
+            frm.grid_columnconfigure(1, weight=1)
+            frm.grid_rowconfigure(4, weight=1)
+            frm.grid_rowconfigure(5, weight=1)
+
+            def add_label(row, text):
+                tk.Label(frm, text=text).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=4)
+
+            add_label(0, T("Stav", "Status"))
+            tk.Label(frm, text=T("uzavřena", "geschlossen"), anchor="w").grid(
+                row=0, column=1, sticky="ew", pady=4
+            )
+
+            add_label(1, "Alarm")
+            alarm_var = tk.StringVar(value=porucha.get("alarm", "") or "")
+            alarm_entry = ttk.Entry(frm, textvariable=alarm_var)
+            alarm_entry.grid(row=1, column=1, sticky="ew", pady=4)
+
+            add_label(2, T("Kategorie", "Kategorie"))
+            kat_to_key = {
+                T("Elektrická", "Elektrisch"): "elektricka",
+                T("Mechanická", "Mechanisch"): "mechanicka",
+                T("Jiná", "Sonstige"): "jina",
+            }
+            kat_values = list(kat_to_key)
+            key_to_kat = {v: k for k, v in kat_to_key.items()}
+            kat_var = tk.StringVar(value=key_to_kat.get(
+                normalize_kategorie(porucha.get("kategorie", "")),
+                T("Jiná", "Sonstige"),
+            ))
+            kat_cb = ttk.Combobox(frm, textvariable=kat_var, state="readonly", values=kat_values)
+            kat_cb.grid(row=2, column=1, sticky="w", pady=4)
+
+            add_label(3, T("Uzavřel operátor", "Operator geschlossen"))
+            operator_var = tk.StringVar(value=porucha.get("operator_uzavrel", "") or "")
+            ttk.Entry(frm, textvariable=operator_var).grid(row=3, column=1, sticky="ew", pady=4)
+
+            def add_text(row, label, initial):
+                add_label(row, label)
+                box_frame = tk.Frame(frm)
+                box_frame.grid(row=row, column=1, sticky="nsew", pady=4)
+                box_frame.grid_rowconfigure(0, weight=1)
+                box_frame.grid_columnconfigure(0, weight=1)
+                txt = tk.Text(box_frame, height=7, wrap="word")
+                scroll = ttk.Scrollbar(box_frame, orient="vertical", command=txt.yview)
+                txt.configure(yscrollcommand=scroll.set)
+                txt.grid(row=0, column=0, sticky="nsew")
+                scroll.grid(row=0, column=1, sticky="ns")
+                txt.insert("1.0", initial or "")
+                return txt
+
+            popis_txt = add_text(
+                4, T("Popis", "Beschreibung"), porucha.get("popis", "") or ""
+            )
+            reseni_txt = add_text(
+                5, T("Řešení", "Lösung"), porucha.get("reseni", "") or ""
+            )
+
+            result = {"value": None}
+
+            def ask_save():
+                confirm = tk.Toplevel(dlg)
+                confirm.title(T("Uložit změny?", "Änderungen speichern?"))
+                confirm.transient(dlg)
+                confirm.grab_set()
+                confirm.resizable(False, False)
+
+                cfrm = tk.Frame(confirm, padx=16, pady=14)
+                cfrm.pack(fill="both", expand=True)
+                tk.Label(
+                    cfrm,
+                    text=T(
+                        "Tato uzavřená porucha bude změněna.\n"
+                        "Chcete změny uložit?",
+                        "Diese geschlossene Störung wird geändert.\n"
+                        "Möchten Sie die Änderungen speichern?",
+                    ),
+                    justify="left",
+                    wraplength=420,
+                ).pack(anchor="w", pady=(0, 14))
+
+                answer = {"ok": False}
+
+                def speichern():
+                    answer["ok"] = True
+                    confirm.destroy()
+
+                def abbrechen_confirm():
+                    confirm.destroy()
+
+                cbtns = tk.Frame(cfrm)
+                cbtns.pack(anchor="e")
+                ttk.Button(
+                    cbtns,
+                    text=T("Zrušit", "Abbrechen"),
+                    width=12,
+                    command=abbrechen_confirm,
+                ).pack(side="right")
+                ttk.Button(
+                    cbtns,
+                    text=T("Uložit", "Speichern"),
+                    width=12,
+                    command=speichern,
+                ).pack(side="right", padx=(0, 8))
+                confirm.bind("<Return>", lambda e: speichern())
+                confirm.bind("<Escape>", lambda e: abbrechen_confirm())
+                confirm.protocol("WM_DELETE_WINDOW", abbrechen_confirm)
+                center_over(confirm, dlg)
+                dlg.wait_window(confirm)
+                return answer["ok"]
+
+            def speichern():
+                if not ask_save():
+                    return
+                result["value"] = {
+                    "alarm": alarm_var.get().strip(),
+                    "kategorie": kat_to_key.get(kat_var.get(), "jina"),
+                    "popis": popis_txt.get("1.0", "end-1c").strip(),
+                    "reseni": reseni_txt.get("1.0", "end-1c").strip(),
+                    "operator_uzavrel": operator_var.get().strip(),
+                }
+                dlg.destroy()
+
+            def abbrechen():
+                dlg.destroy()
+
+            btns = tk.Frame(frm)
+            btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
+            ttk.Button(
+                btns, text=T("Zrušit", "Abbrechen"), width=12, command=abbrechen
+            ).pack(side="right")
+            ttk.Button(
+                btns, text=T("Uložit", "Speichern"), width=12, command=speichern
+            ).pack(side="right", padx=(0, 8))
+
+            dlg.bind("<Control-Return>", lambda e: speichern())
+            dlg.bind("<Escape>", lambda e: abbrechen())
+            dlg.protocol("WM_DELETE_WINDOW", abbrechen)
+            dlg.after(0, alarm_entry.focus_set)
+            center_over(dlg, parent_win)
+            parent_win.wait_window(dlg)
+            return result["value"]
+
+        values = edit_dialog(parent, target)
+        if values is None:
+            return
+
+        target_id = str(target.get("id", "")).strip()
+        updated = False
+        for p in por:
+            if str(p.get("id", "")).strip() == target_id:
+                p["alarm"] = values["alarm"]
+                p["kategorie"] = values["kategorie"]
+                p["popis"] = values["popis"]
+                p["reseni"] = values["reseni"]
+                p["operator_uzavrel"] = values["operator_uzavrel"]
+                p["stav"] = "uzavrena"
+                updated = True
+                break
+
+        if not updated:
+            messagebox.showwarning(
+                T("Upozornění", "Warnung"),
+                T(
+                    "Vybraná porucha nebyla nalezena.",
+                    "Ausgewählte Störung wurde nicht gefunden.",
+                ),
+                parent=parent,
+            )
+            return
+
+        uloz_poruchy(por)
+        self.poruchy = por
+        self._audit_event(
+            "fault_updated",
+            "fault",
+            entity_id=target_id,
+            machine_number=cislo,
+            details={"fields": audit.changed_fields(before, target)},
+        )
+        messagebox.showinfo(
+            T("Uloženo", "Gespeichert"),
+            T(
+                f"Porucha ID {target_id} byla opravena.",
+                f"Störung ID {target_id} wurde korrigiert.",
+            ),
+            parent=parent,
+        )
 
     def pridat_stroj_gui(self):
         """Dialog pro přidání nového stroje přes dlaždici + nebo klávesu N."""
@@ -3127,9 +3876,19 @@ class StrojeGrid(StrojeGrid):  # rozšíření
             "rok": rok,
             "spm": spm,
             "seriove": seriove,
-            "stav": stav
+            "stav": stav,
+            "wartung_last": "",
+            "wartung_interval": "180",
+            "archivovan": "0",
         }
         uloz_stroje(self.stroje)
+        self._audit_event(
+            "machine_created",
+            "machine",
+            entity_id=cislo,
+            machine_number=cislo,
+            details={"fields": audit.changed_fields({}, self.stroje[cislo])},
+        )
         self.nakresli_mrizku()
         messagebox.showinfo(T("Přidat stroj", "Maschine hinzufügen"),
                             f"{T('Stroj', 'Maschine')} {cislo} {T('uložen', 'gespeichert')}.", parent=self)
@@ -3150,9 +3909,27 @@ class StrojeGrid(StrojeGrid):  # rozšíření
             return
 
         s = self.stroje[cislo]
+        if dm.is_archived_machine(s):
+            messagebox.showinfo(
+                T("Archivovaný stroj", "Archivierte Maschine"),
+                T(
+                    "Stav archivovaného stroje nelze přepnout.",
+                    "Der Status einer archivierten Maschine kann nicht geändert werden.",
+                ),
+                parent=self,
+            )
+            return
+        before = dict(s)
         cur = normalize_stav(s.get("stav", "bezi"))
         s["stav"] = "porucha" if cur == "bezi" else "bezi"
         uloz_stroje(self.stroje)
+        self._audit_event(
+            "machine_status_changed",
+            "machine",
+            entity_id=cislo,
+            machine_number=cislo,
+            details={"fields": audit.changed_fields(before, s)},
+        )
         self.nakresli_mrizku()
 
 
@@ -3178,7 +3955,7 @@ def vyber_otevrenou_poruchu_combo(parent, opened: list):
         return text[: max_len - 3].rstrip() + "..."
 
     top = tk.Toplevel(parent)
-    top.title("Störung schließen")
+    top.title(T("Uzavřít poruchu", "Störung schließen"))
     top.transient(parent)
     top.grab_set()
     top.resizable(True, True)
@@ -3191,7 +3968,10 @@ def vyber_otevrenou_poruchu_combo(parent, opened: list):
 
     tk.Label(
         frm,
-        text="Bitte eine offene Störung zum Schließen auswählen.",
+        text=T(
+            "Vyberte otevřenou poruchu k uzavření.",
+            "Bitte eine offene Störung zum Schließen auswählen.",
+        ),
         font=("Segoe UI", 10, "bold"),
     ).grid(row=0, column=0, sticky="w", pady=(0, 10))
 
@@ -3203,10 +3983,10 @@ def vyber_otevrenou_poruchu_combo(parent, opened: list):
 
     tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=10)
     tree.heading("id", text="ID")
-    tree.heading("cas", text="Datum/Zeit")
-    tree.heading("kategorie", text="Kategorie")
+    tree.heading("cas", text=T("Datum/čas", "Datum/Zeit"))
+    tree.heading("kategorie", text=T("Kategorie", "Kategorie"))
     tree.heading("alarm", text="Alarm")
-    tree.heading("popis", text="Beschreibung")
+    tree.heading("popis", text=T("Popis", "Beschreibung"))
     tree.column("id", width=60, anchor="center", stretch=False)
     tree.column("cas", width=150, anchor="w", stretch=False)
     tree.column("kategorie", width=120, anchor="w", stretch=False)
@@ -3249,7 +4029,11 @@ def vyber_otevrenou_poruchu_combo(parent, opened: list):
     def _ok():
         selection = tree.selection()
         if not selection:
-            messagebox.showwarning("Warnung", "Bitte eine Störung auswählen.", parent=top)
+            messagebox.showwarning(
+                T("Upozornění", "Warnung"),
+                T("Vyberte poruchu.", "Bitte eine Störung auswählen."),
+                parent=top,
+            )
             return
         chosen["value"] = by_id.get(selection[0])
         top.destroy()
@@ -3266,8 +4050,8 @@ def vyber_otevrenou_poruchu_combo(parent, opened: list):
 
     btns = tk.Frame(frm)
     btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
-    ttk.Button(btns, text="Abbrechen", width=12, command=_cancel).pack(side="right")
-    ttk.Button(btns, text="Schließen", width=12, command=_ok).pack(side="right", padx=(0, 8))
+    ttk.Button(btns, text=T("Zrušit", "Abbrechen"), width=12, command=_cancel).pack(side="right")
+    ttk.Button(btns, text=T("Uzavřít", "Schließen"), width=12, command=_ok).pack(side="right", padx=(0, 8))
 
     top.bind("<Return>", lambda e: _ok())
     top.bind("<Escape>", lambda e: _cancel())
@@ -3280,5 +4064,10 @@ def vyber_otevrenou_poruchu_combo(parent, opened: list):
 
 # ===== Main =====
 if __name__ == "__main__":
+    configure_logging(DATA_DIR)
     app = StrojeGrid()
-    app.mainloop()
+    install_tk_exception_handler(app, T)
+    if app.vybrat_operatora_gui(required=True):
+        app.mainloop()
+    else:
+        app.destroy()

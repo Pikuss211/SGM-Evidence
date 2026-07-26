@@ -15,10 +15,13 @@ venv/
 # Build / packaging
 build/
 dist/
+release/
 *.spec
 
 # Logs
 *.log
+tests/_runtime/
+backups/
 
 # OS files
 Thumbs.db
